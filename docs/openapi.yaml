@@ -1,0 +1,745 @@
+openapi: 3.1.0
+info:
+  title: Cambridge Sustainable Food App API
+  version: "0.1.0"
+  description: >
+    Canonical API contract for the CSF Food Flow Log. This file is the
+    single source of truth for request/response shapes shared between
+    csf-food-flow-api (Sanic/msgspec, hand-implemented against this spec)
+    and csf-food-flow-pwa (Preact/TypeScript, types generated FROM this
+    spec via `npm run generate:types`).
+
+    Sync discipline: this file lives canonically in csf-food-flow-api/docs/
+    and is copied into csf-food-flow-pwa/docs/ whenever it changes. There is
+    no automated cross-repo sync -- if you change this spec, update both
+    copies in the same change, and regenerate PWA types before committing.
+
+servers:
+  - url: /api/v1
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: csf_session
+      description: >
+        httpOnly, Secure, SameSite=None session cookie, set by
+        /auth/magic-link/verify. Required cross-origin config: CORS_ORIGIN
+        must be the PWA's exact origin (never "*") and requests must be
+        made with credentials: 'include'.
+
+  schemas:
+    Role:
+      type: string
+      enum: [ADMIN, FOOD_CENTRE, HUB]
+
+    EntryType:
+      type: string
+      enum: [IN, OUT]
+
+    EntryStatus:
+      type: string
+      enum: [ACTIVE, VOID]
+
+    LocationType:
+      type: string
+      enum: [HUB, FOOD_CENTRE]
+
+    FoodCategoryCode:
+      type: string
+      enum: [FRESH, FROZEN, AMBIENT]
+
+    User:
+      type: object
+      required: [id, name, email, role, active]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/Role" }
+        location_id: { type: [string, "null"], format: uuid }
+        active: { type: boolean }
+        last_login_at: { type: [string, "null"], format: date-time }
+
+    Location:
+      type: object
+      required: [id, name, type, active]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        type: { $ref: "#/components/schemas/LocationType" }
+        active: { type: boolean }
+
+    FoodCategory:
+      type: object
+      required: [code, name, active]
+      properties:
+        code: { $ref: "#/components/schemas/FoodCategoryCode" }
+        name: { type: string }
+        active: { type: boolean }
+
+    Entry:
+      type: object
+      required:
+        - id
+        - entry_type
+        - location_id
+        - food_category_code
+        - weight_kg
+        - collection_date
+        - status
+        - created_by
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        client_uuid: { type: [string, "null"], format: uuid }
+        entry_type: { $ref: "#/components/schemas/EntryType" }
+        location_id: { type: string, format: uuid }
+        destination_location_id: { type: [string, "null"], format: uuid }
+        food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
+        weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+        collection_date: { type: string, format: date }
+        notes: { type: [string, "null"] }
+        status: { $ref: "#/components/schemas/EntryStatus" }
+        void_reason: { type: [string, "null"] }
+        created_by: { type: string, format: uuid }
+        updated_by: { type: [string, "null"], format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    Pagination:
+      type: object
+      required: [page, limit, total]
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1 }
+        total: { type: integer, minimum: 0 }
+
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string }
+            message: { type: string }
+
+    CategoryTotals:
+      type: object
+      properties:
+        FRESH: { type: number }
+        FROZEN: { type: number }
+        AMBIENT: { type: number }
+
+    WeeklyReport:
+      type: object
+      required: [week_start, week_end, totals, by_location]
+      properties:
+        week_start: { type: string, format: date }
+        week_end: { type: string, format: date }
+        totals:
+          type: object
+          required: [in_by_category, out_by_category]
+          properties:
+            in_by_category: { $ref: "#/components/schemas/CategoryTotals" }
+            out_by_category: { $ref: "#/components/schemas/CategoryTotals" }
+        by_location:
+          type: array
+          items:
+            type: object
+            required: [location_id, location_name, in_by_category, out_by_category]
+            properties:
+              location_id: { type: string, format: uuid }
+              location_name: { type: string }
+              in_by_category: { $ref: "#/components/schemas/CategoryTotals" }
+              out_by_category: { $ref: "#/components/schemas/CategoryTotals" }
+
+  responses:
+    ValidationError:
+      description: Input failed validation
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Unauthorized:
+      description: Missing or invalid session
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+    Forbidden:
+      description: Authenticated but not permitted for this role
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Confirm API availability and deployment health
+      security: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  version: { type: string }
+
+  /auth/magic-link/request:
+    post:
+      operationId: requestMagicLink
+      summary: Start passwordless sign-in by emailing a one-time magic link
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: >
+            Always a generic success, whether or not the email exists or is
+            active, to avoid user enumeration.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [requested] }
+
+  /auth/magic-link/verify:
+    post:
+      operationId: verifyMagicLink
+      summary: Validate a one-time magic-link token and establish a session
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          description: >
+            Sets the httpOnly session cookie via Set-Cookie. Response body
+            does not include the token itself.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401":
+          description: Token expired, already used, or invalid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /me:
+    get:
+      operationId: getMe
+      summary: Retrieve the authenticated user profile
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /categories:
+    get:
+      operationId: listCategories
+      summary: List active food categories for form dropdowns and validation
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/FoodCategory" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /locations:
+    get:
+      operationId: listLocations
+      summary: List locations according to the authenticated user's role
+      description: >
+        HUB users receive only their own assigned location, never the full
+        list. ADMIN may include inactive locations via `active=false`.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: active
+          in: query
+          schema: { type: boolean }
+        - name: type
+          in: query
+          schema: { $ref: "#/components/schemas/LocationType" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Location" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createLocation
+      summary: Create a new hub or food centre
+      security: [{ cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, type]
+              properties:
+                name: { type: string }
+                type: { $ref: "#/components/schemas/LocationType" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Location" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /locations/{id}:
+    patch:
+      operationId: updateLocation
+      summary: Update a location name, type, or active status
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                type: { $ref: "#/components/schemas/LocationType" }
+                active: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Location" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Not found }
+
+  /entries:
+    get:
+      operationId: listEntries
+      summary: List and filter weigh entries permitted for the authenticated user
+      description: >
+        HUB role is restricted to entries where location_id equals the
+        user's assigned location; any other requested location_id is
+        ignored or rejected server-side, never trusted from the client.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: week_start
+          in: query
+          schema: { type: string, format: date }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: location_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: destination_location_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: entry_type
+          in: query
+          schema: { $ref: "#/components/schemas/EntryType" }
+        - name: food_category_code
+          in: query
+          schema: { $ref: "#/components/schemas/FoodCategoryCode" }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/EntryStatus" }
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entries, pagination]
+                properties:
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/Entry" }
+                  pagination: { $ref: "#/components/schemas/Pagination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createEntry
+      summary: Create a single weigh-in or weigh-out entry
+      description: >
+        Role rules enforced server-side: HUB may only create IN entries at
+        their own assigned location with destination_location_id null;
+        FOOD_CENTRE may create IN at the centre or OUT to any hub; ADMIN may
+        create either for any valid location.
+      security: [{ cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - client_uuid
+                - entry_type
+                - location_id
+                - food_category_code
+                - weight_kg
+                - collection_date
+              properties:
+                client_uuid: { type: string, format: uuid }
+                entry_type: { $ref: "#/components/schemas/EntryType" }
+                location_id: { type: string, format: uuid }
+                destination_location_id: { type: [string, "null"], format: uuid }
+                food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
+                weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+                collection_date: { type: string, format: date }
+                notes: { type: [string, "null"] }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entry]
+                properties:
+                  entry: { $ref: "#/components/schemas/Entry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /entries/bulk:
+    post:
+      operationId: bulkSyncEntries
+      summary: Sync offline entries from the PWA in an idempotent way
+      description: >
+        Uses client_uuid to deduplicate. An entry with a client_uuid that
+        already exists is returned as status "duplicate", not an error --
+        this is the offline-sync-safe behaviour the PWA's queue relies on.
+      security: [{ cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entries]
+              properties:
+                entries:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - client_uuid
+                      - entry_type
+                      - location_id
+                      - food_category_code
+                      - weight_kg
+                      - collection_date
+                    properties:
+                      client_uuid: { type: string, format: uuid }
+                      entry_type: { $ref: "#/components/schemas/EntryType" }
+                      location_id: { type: string, format: uuid }
+                      destination_location_id: { type: [string, "null"], format: uuid }
+                      food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
+                      weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+                      collection_date: { type: string, format: date }
+                      notes: { type: [string, "null"] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [client_uuid, status]
+                      properties:
+                        client_uuid: { type: string, format: uuid }
+                        status: { type: string, enum: [created, duplicate, error] }
+                        id: { type: [string, "null"], format: uuid }
+                        message: { type: [string, "null"] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /entries/{id}:
+    get:
+      operationId: getEntry
+      summary: Retrieve one specific entry if permitted by role and location access
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entry]
+                properties:
+                  entry: { $ref: "#/components/schemas/Entry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Not found }
+    patch:
+      operationId: correctEntry
+      summary: Correct an existing entry
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                location_id: { type: string, format: uuid }
+                destination_location_id: { type: [string, "null"], format: uuid }
+                food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
+                weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+                collection_date: { type: string, format: date }
+                notes: { type: [string, "null"] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entry]
+                properties:
+                  entry: { $ref: "#/components/schemas/Entry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /entries/{id}/void:
+    post:
+      operationId: voidEntry
+      summary: Void an incorrect entry without hard-deleting it
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [entry]
+                properties:
+                  entry: { $ref: "#/components/schemas/Entry" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /reports/weekly:
+    get:
+      operationId: getWeeklyReport
+      summary: Retrieve Monday-to-Sunday weekly totals by location and category
+      description: >
+        HUB may only view their own hub's report; any other requested
+        location_id is ignored or rejected server-side. week_start must be
+        a Monday or the API returns a validation error.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: week_start
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: location_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WeeklyReport" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: week_start is not a Monday
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /reports/weekly/export.csv:
+    get:
+      operationId: exportWeeklyCsv
+      summary: >
+        Export the Monday-to-Sunday weekly report matching the current
+        spreadsheet layout
+      description: >
+        V1 restricts this to ADMIN. Exact column layout is PENDING
+        operational validation against the real CSF spreadsheet template --
+        see Step 3/4 notes.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: week_start
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: location_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: CSV file
+          content:
+            text/csv:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /users:
+    get:
+      operationId: listUsers
+      summary: List users for administration
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: active
+          in: query
+          schema: { type: boolean }
+        - name: role
+          in: query
+          schema: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      operationId: createUser
+      summary: Create a new user account without a password
+      security: [{ cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, role]
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                role: { $ref: "#/components/schemas/Role" }
+                location_id: { type: [string, "null"], format: uuid }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /users/{id}:
+    patch:
+      operationId: updateUser
+      summary: Update user name, email, role, location, or active status
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                email: { type: string, format: email }
+                role: { $ref: "#/components/schemas/Role" }
+                location_id: { type: [string, "null"], format: uuid }
+                active: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Not found }

@@ -1,0 +1,26 @@
+# --- Core framework ---
+sanic==25.12.1
+sanic-ext==25.12.0
+pydantic==2.13.4  # sanic-ext imports this internally but doesn't declare it as a dependency
+
+# --- Database ---
+asyncpg==0.31.0
+
+# --- Request/response typing & validation ---
+msgspec==0.21.1
+
+# --- Auth ---
+pyjwt==2.13.0
+
+# --- Email (magic links) ---
+resend==2.37.0
+
+# --- Observability ---
+structlog==26.1.0
+
+# --- Config ---
+python-dotenv==1.0.1
+
+# --- Testing ---
+pytest==8.3.4
+pytest-asyncio==0.25.2
