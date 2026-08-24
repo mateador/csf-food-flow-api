@@ -38,6 +38,7 @@ CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "http://localhost:5173")
 app.config.CORS_ORIGINS = CORS_ORIGIN
 app.config.CORS_SUPPORTS_CREDENTIALS = True
 app.config.CORS_METHODS = ["GET", "POST", "PATCH", "DELETE", "OPTIONS"]
+app.config.CORS_ALLOW_HEADERS = ["content-type"]
 
 Extend(app)
 
