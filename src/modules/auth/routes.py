@@ -15,7 +15,7 @@ from src.modules.auth.service import (
 auth_bp = Blueprint("auth", url_prefix="/auth")
 
 MAGIC_LINK_BASE_URL = os.environ.get("MAGIC_LINK_BASE_URL", "http://localhost:5173")
-IS_PRODUCTION = os.environ.get("SANIC_DEV", "true").lower() != "true"
+IS_PRODUCTION = os.environ.get("SANIC_DEV", "false").lower() != "true"
 
 
 @auth_bp.post("/magic-link/request")
