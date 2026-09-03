@@ -43,11 +43,18 @@ async def create_magic_link_token(user_id: str) -> str:
     return raw_token
 
 
-async def verify_and_consume_magic_link_token(raw_token: str) -> dict | None:
+async def verify_and_consume_magic_link_token(raw_token: str) -> dict | str | None:
     """
     Validates a token, marks it used, updates last_login_at, all in one
-    transaction. Returns the user row on success, None if the token is
-    invalid/expired/already-used.
+    transaction.
+
+    Returns:
+        dict            -- the user row, on success
+        "ALREADY_USED"  -- token exists but was already consumed
+        "EXPIRED"       -- token exists, unused, but past its expiry
+        None            -- token doesn't exist at all (no security value
+                            in distinguishing this from the two above for
+                            a bad-faith or guessed token)
     """
     token_hash = _hash_token(raw_token)
 
@@ -60,12 +67,13 @@ async def verify_and_consume_magic_link_token(raw_token: str) -> dict | None:
                    FOR UPDATE""",
                 token_hash,
             )
+
             if not token_row:
                 return None
             if token_row["used_at"] is not None:
-                return None
+                return "ALREADY_USED"
             if token_row["expires_at"] < datetime.now(timezone.utc):
-                return None
+                return "EXPIRED"
 
             await conn.execute(
                 "UPDATE magic_link_tokens SET used_at = now() WHERE id = $1",

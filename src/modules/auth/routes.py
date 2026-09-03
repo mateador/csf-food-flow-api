@@ -49,12 +49,25 @@ async def verify_magic_link(request):
             status=422,
         )
 
-    user = await verify_and_consume_magic_link_token(token)
-    if not user:
+    result = await verify_and_consume_magic_link_token(token)
+
+    if result == "ALREADY_USED":
+        return json_response(
+            {"error": {"code": "ALREADY_USED", "message": "This link has already been used."}},
+            status=401,
+        )
+    if result == "EXPIRED":
+        return json_response(
+            {"error": {"code": "EXPIRED", "message": "This link has expired \u2014 request a new one."}},
+            status=401,
+        )
+    if not result:
         return json_response(
             {"error": {"code": "UNAUTHORIZED", "message": "Invalid or expired token"}},
             status=401,
         )
+
+    user = result
 
     session_jwt = issue_session_jwt(user)
 
