@@ -31,7 +31,7 @@ LOCATIONS = [
 # The initial admin account. No password -- auth is magic-link only, so
 # this user signs in the same way anyone else does: request a link at
 # /login, no separate bootstrap credential needed.
-ADMIN_EMAIL = os.environ.get("SEED_ADMIN_EMAIL", "admin@example.org")
+ADMIN_EMAIL = os.environ.get("SEED_ADMIN_EMAIL", "alexandre.als@gmail.com")
 ADMIN_NAME = "CSF Admin"
 
 

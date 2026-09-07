@@ -16,6 +16,7 @@ def _serialize_entry(row) -> dict:
         "destination_location_id": str(row["destination_location_id"])
         if row["destination_location_id"]
         else None,
+        "name": row["name"],
         "food_category_code": row["food_category_code"],
         "weight_kg": float(row["weight_kg"]),
         "collection_date": row["collection_date"].isoformat(),
@@ -45,13 +46,14 @@ async def create_entry(request):
     entry_type = body.get("entry_type")
     location_id = body.get("location_id")
     destination_location_id = body.get("destination_location_id")
+    name = body.get("name")
     food_category_code = body.get("food_category_code")
     weight_kg = body.get("weight_kg")
     collection_date = body.get("collection_date")
     notes = body.get("notes")
     client_uuid = body.get("client_uuid")
 
-    if not all([entry_type, location_id, food_category_code, weight_kg, collection_date]):
+    if not all([entry_type, location_id, name, food_category_code, weight_kg, collection_date]):
         return json_response(
             {"error": {"code": "VALIDATION_ERROR", "message": "Missing required field"}},
             status=422,
@@ -116,7 +118,7 @@ async def create_entry(request):
         try:
             row = await conn.fetchrow(
                 """INSERT INTO weigh_entries
-                   (client_uuid, entry_type, location_id, destination_location_id,
+                   (client_uuid, entry_type, location_id, destination_location_id, name,
                     food_category_code, weight_kg, collection_date, notes, created_by)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                    RETURNING *""",
@@ -124,6 +126,7 @@ async def create_entry(request):
                 entry_type,
                 location_id,
                 destination_location_id,
+                name,
                 food_category_code,
                 weight_kg,
                 collection_date,
@@ -264,7 +267,7 @@ async def bulk_sync_entries(request):
                 collection_date = date.fromisoformat(item.get("collection_date"))
                 row = await conn.fetchrow(
                     """INSERT INTO weigh_entries
-                       (client_uuid, entry_type, location_id, destination_location_id,
+                       (client_uuid, entry_type, location_id, destination_location_id, name,
                         food_category_code, weight_kg, collection_date, notes, created_by)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                        RETURNING id""",
@@ -272,6 +275,7 @@ async def bulk_sync_entries(request):
                     item.get("entry_type"),
                     item.get("location_id"),
                     item.get("destination_location_id"),
+                    item.get("name"),
                     item.get("food_category_code"),
                     item.get("weight_kg"),
                     collection_date,

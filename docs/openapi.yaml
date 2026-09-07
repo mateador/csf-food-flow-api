@@ -85,6 +85,7 @@ components:
         - id
         - entry_type
         - location_id
+        - name
         - food_category_code
         - weight_kg
         - collection_date
@@ -98,6 +99,7 @@ components:
         entry_type: { $ref: "#/components/schemas/EntryType" }
         location_id: { type: string, format: uuid }
         destination_location_id: { type: [string, "null"], format: uuid }
+        name: { type: string, description: "Name/description of the item being weighed" }
         food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
         weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
         collection_date: { type: string, format: date }
@@ -431,6 +433,7 @@ paths:
                 - client_uuid
                 - entry_type
                 - location_id
+                - name
                 - food_category_code
                 - weight_kg
                 - collection_date
@@ -439,6 +442,7 @@ paths:
                 entry_type: { $ref: "#/components/schemas/EntryType" }
                 location_id: { type: string, format: uuid }
                 destination_location_id: { type: [string, "null"], format: uuid }
+                name: { type: string, description: "Name/description of the item being weighed" }
                 food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
                 weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
                 collection_date: { type: string, format: date }
@@ -482,6 +486,7 @@ paths:
                       - client_uuid
                       - entry_type
                       - location_id
+                      - name
                       - food_category_code
                       - weight_kg
                       - collection_date
@@ -490,6 +495,7 @@ paths:
                       entry_type: { $ref: "#/components/schemas/EntryType" }
                       location_id: { type: string, format: uuid }
                       destination_location_id: { type: [string, "null"], format: uuid }
+                      name: { type: string, description: "Name/description of the item being weighed" }
                       food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
                       weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
                       collection_date: { type: string, format: date }
