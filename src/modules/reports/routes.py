@@ -141,7 +141,7 @@ async def weekly_export_csv(request):
     async with pool().acquire() as conn:
         rows = await conn.fetch(
             f"""SELECT we.collection_date, l.name AS location_name, we.entry_type,
-                       we.food_category_code, we.weight_kg
+                       we.food_category_code, we.name, we.weight_kg
                 FROM weigh_entries we
                 JOIN locations l ON l.id = we.location_id
                 WHERE {' AND '.join(conditions)}
@@ -151,7 +151,7 @@ async def weekly_export_csv(request):
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["Date", "Location", "Type", "Category", "Weight (kg)"])  # PLACEHOLDER layout
+    writer.writerow(["Date", "Location", "Type", "Category", "Name", "Weight (kg)"])  # PLACEHOLDER layout
     for row in rows:
         writer.writerow(
             [
@@ -159,6 +159,7 @@ async def weekly_export_csv(request):
                 row["location_name"],
                 row["entry_type"],
                 row["food_category_code"],
+                row["name"],
                 float(row["weight_kg"]),
             ]
         )
