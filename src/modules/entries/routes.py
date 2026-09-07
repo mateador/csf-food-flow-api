@@ -120,7 +120,7 @@ async def create_entry(request):
                 """INSERT INTO weigh_entries
                    (client_uuid, entry_type, location_id, destination_location_id, name,
                     food_category_code, weight_kg, collection_date, notes, created_by)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                    RETURNING *""",
                 client_uuid,
                 entry_type,
@@ -269,7 +269,7 @@ async def bulk_sync_entries(request):
                     """INSERT INTO weigh_entries
                        (client_uuid, entry_type, location_id, destination_location_id, name,
                         food_category_code, weight_kg, collection_date, notes, created_by)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                        RETURNING id""",
                     client_uuid,
                     item.get("entry_type"),
