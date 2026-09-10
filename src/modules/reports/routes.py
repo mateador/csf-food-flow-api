@@ -10,11 +10,8 @@ from src.middleware.auth import get_current_user, require_auth, require_role
 
 reports_bp = Blueprint("reports", url_prefix="/reports")
 
-CATEGORY_CODES = ["FRESH", "FROZEN", "AMBIENT"]
-
-
-def _empty_category_totals() -> dict:
-    return {code: 0.0 for code in CATEGORY_CODES}
+def _empty_category_totals(category_codes: list[str]) -> dict:
+    return {code: 0.0 for code in category_codes}
 
 
 async def _compute_weekly_totals(week_start: date, location_filter: str | None):
@@ -35,17 +32,24 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
     async with pool().acquire() as conn:
         rows = await conn.fetch(
             f"""SELECT location_id, destination_location_id, entry_type,
-                       food_category_code, weight_kg
+                       food_category_code, net_weight_kg
                 FROM weigh_entries
                 WHERE {' AND '.join(conditions)}""",
             *params,
         )
         location_rows = await conn.fetch("SELECT id, name FROM locations")
+        # food_categories is the single source of truth for which codes
+        # exist -- querying it here (rather than a hardcoded list) is what
+        # keeps this report correct as categories are added or retired,
+        # instead of throwing a KeyError the first time a new category is
+        # actually used.
+        category_rows = await conn.fetch("SELECT code FROM food_categories WHERE active = true")
+        category_codes = [r["code"] for r in category_rows]
 
     location_names = {str(r["id"]): r["name"] for r in location_rows}
 
-    totals_in = _empty_category_totals()
-    totals_out = _empty_category_totals()
+    totals_in = _empty_category_totals(category_codes)
+    totals_out = _empty_category_totals(category_codes)
     by_location: dict[str, dict] = {}
 
     def ensure_location(loc_id: str) -> dict:
@@ -53,13 +57,17 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
             by_location[loc_id] = {
                 "location_id": loc_id,
                 "location_name": location_names.get(loc_id, "Unknown"),
-                "in_by_category": _empty_category_totals(),
-                "out_by_category": _empty_category_totals(),
+                "in_by_category": _empty_category_totals(category_codes),
+                "out_by_category": _empty_category_totals(category_codes),
             }
         return by_location[loc_id]
 
     for row in rows:
-        weight = float(row["weight_kg"])
+        # Net weight -- the actual food weight, with tray/container weight
+        # already subtracted -- is the meaningful reporting figure. Gross
+        # weight (still available on the entry itself) still includes
+        # whatever trays carried it.
+        weight = float(row["net_weight_kg"])
         code = row["food_category_code"]
         if row["entry_type"] == "IN":
             totals_in[code] += weight
@@ -116,9 +124,10 @@ async def weekly_report(request):
 async def weekly_export_csv(request):
     """
     V1 restricted to ADMIN per spec. Column layout is a FLAT placeholder
-    (date, location, entry_type, category, weight_kg) -- PENDING validation
-    against the real CSF spreadsheet template. See docs/CONTRACT.md and the
-    root README's "Known assumptions" section.
+    (date, location, entry_type, name, category, gross weight, trays, net
+    weight) -- PENDING validation against the real CSF spreadsheet
+    template. See docs/CONTRACT.md and the root README's "Known
+    assumptions" section.
     """
     raw_week_start = request.args.get("week_start")
     if not raw_week_start:
@@ -140,8 +149,9 @@ async def weekly_export_csv(request):
 
     async with pool().acquire() as conn:
         rows = await conn.fetch(
-            f"""SELECT we.collection_date, l.name AS location_name, we.entry_type,
-                       we.food_category_code, we.name, we.weight_kg
+            f"""SELECT we.id, we.collection_date, l.name AS location_name, we.entry_type,
+                       we.name AS item_name, we.food_category_code,
+                       we.gross_weight_kg, we.net_weight_kg
                 FROM weigh_entries we
                 JOIN locations l ON l.id = we.location_id
                 WHERE {' AND '.join(conditions)}
@@ -149,18 +159,36 @@ async def weekly_export_csv(request):
             *params,
         )
 
+        entry_ids = [str(r["id"]) for r in rows]
+        trays_by_entry: dict[str, list[str]] = {}
+        if entry_ids:
+            tray_rows = await conn.fetch(
+                """SELECT et.entry_id, tt.name, et.quantity
+                   FROM entry_trays et
+                   JOIN tray_types tt ON tt.code = et.tray_type_code
+                   WHERE et.entry_id = ANY($1::uuid[])
+                   ORDER BY tt.name""",
+                entry_ids,
+            )
+            for r in tray_rows:
+                trays_by_entry.setdefault(str(r["entry_id"]), []).append(f"{r['quantity']}x {r['name']}")
+
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["Date", "Location", "Type", "Category", "Name", "Weight (kg)"])  # PLACEHOLDER layout
+    writer.writerow(
+        ["Date", "Location", "Type", "Name", "Category", "Gross Weight (kg)", "Trays", "Net Weight (kg)"]
+    )  # PLACEHOLDER layout
     for row in rows:
         writer.writerow(
             [
                 row["collection_date"].isoformat(),
                 row["location_name"],
                 row["entry_type"],
+                row["item_name"],
                 row["food_category_code"],
-                row["name"],
-                float(row["weight_kg"]),
+                float(row["gross_weight_kg"]),
+                "; ".join(trays_by_entry.get(str(row["id"]), [])),
+                float(row["net_weight_kg"]),
             ]
         )
 

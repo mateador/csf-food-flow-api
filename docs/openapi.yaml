@@ -48,7 +48,40 @@ components:
 
     FoodCategoryCode:
       type: string
-      enum: [FRESH, FROZEN, AMBIENT]
+      enum: [FRESH, FROZEN, AMBIENT, VEG_FRUIT, OTHER_FRESH, BAKERY]
+
+    TrayTypeCode:
+      type: string
+      enum:
+        - MEDIUM
+        - LARGE
+        - LARGE_COLLAPSIBLE
+        - HALF_COLLAPSIBLE
+        - MEDIUM_COLLAPSIBLE
+        - LITTLE_COLLAPSIBLE
+        - SMALL_COLLAPSIBLE
+        - HALF_SOLID
+
+    TrayType:
+      type: object
+      required: [code, name, weight_kg, active]
+      properties:
+        code: { $ref: "#/components/schemas/TrayTypeCode" }
+        name: { type: string }
+        weight_kg: { type: number, exclusiveMinimum: 0 }
+        active: { type: boolean }
+
+    EntryTray:
+      type: object
+      required: [tray_type_code, tray_type_name, quantity, weight_kg]
+      properties:
+        tray_type_code: { $ref: "#/components/schemas/TrayTypeCode" }
+        tray_type_name: { type: string }
+        quantity: { type: integer, exclusiveMinimum: 0 }
+        weight_kg:
+          type: number
+          exclusiveMinimum: 0
+          description: Per-tray weight at the time this entry was recorded.
 
     User:
       type: object
@@ -87,7 +120,9 @@ components:
         - location_id
         - name
         - food_category_code
-        - weight_kg
+        - gross_weight_kg
+        - net_weight_kg
+        - trays
         - collection_date
         - status
         - created_by
@@ -101,7 +136,19 @@ components:
         destination_location_id: { type: [string, "null"], format: uuid }
         name: { type: string, description: "Name/description of the item being weighed" }
         food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
-        weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+        gross_weight_kg:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1000
+          description: What the scale reads -- food and trays together.
+        net_weight_kg:
+          type: number
+          minimum: 0
+          maximum: 1000
+          description: gross_weight_kg minus the combined weight of the trays listed.
+        trays:
+          type: array
+          items: { $ref: "#/components/schemas/EntryTray" }
         collection_date: { type: string, format: date }
         notes: { type: [string, "null"] }
         status: { $ref: "#/components/schemas/EntryStatus" }
@@ -282,6 +329,21 @@ paths:
                 items: { $ref: "#/components/schemas/FoodCategory" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /tray-types:
+    get:
+      operationId: listTrayTypes
+      summary: List active tray types and their weights, for form dropdowns and net-weight calculation
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TrayType" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /locations:
     get:
       operationId: listLocations
@@ -435,7 +497,7 @@ paths:
                 - location_id
                 - name
                 - food_category_code
-                - weight_kg
+                - gross_weight_kg
                 - collection_date
               properties:
                 client_uuid: { type: string, format: uuid }
@@ -444,7 +506,24 @@ paths:
                 destination_location_id: { type: [string, "null"], format: uuid }
                 name: { type: string, description: "Name/description of the item being weighed" }
                 food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
-                weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+                gross_weight_kg:
+                  type: number
+                  exclusiveMinimum: 0
+                  maximum: 1000
+                  description: What the scale reads -- food and trays together.
+                trays:
+                  type: array
+                  description: >
+                    Optional. net_weight_kg is computed server-side as
+                    gross_weight_kg minus the sum of (quantity * that
+                    tray type's current weight) for every entry here --
+                    never trust a client-submitted net figure.
+                  items:
+                    type: object
+                    required: [tray_type_code, quantity]
+                    properties:
+                      tray_type_code: { $ref: "#/components/schemas/TrayTypeCode" }
+                      quantity: { type: integer, exclusiveMinimum: 0 }
                 collection_date: { type: string, format: date }
                 notes: { type: [string, "null"] }
       responses:
@@ -488,7 +567,7 @@ paths:
                       - location_id
                       - name
                       - food_category_code
-                      - weight_kg
+                      - gross_weight_kg
                       - collection_date
                     properties:
                       client_uuid: { type: string, format: uuid }
@@ -497,7 +576,15 @@ paths:
                       destination_location_id: { type: [string, "null"], format: uuid }
                       name: { type: string, description: "Name/description of the item being weighed" }
                       food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
-                      weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+                      gross_weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+                      trays:
+                        type: array
+                        items:
+                          type: object
+                          required: [tray_type_code, quantity]
+                          properties:
+                            tray_type_code: { $ref: "#/components/schemas/TrayTypeCode" }
+                            quantity: { type: integer, exclusiveMinimum: 0 }
                       collection_date: { type: string, format: date }
                       notes: { type: [string, "null"] }
       responses:
@@ -563,7 +650,7 @@ paths:
                 location_id: { type: string, format: uuid }
                 destination_location_id: { type: [string, "null"], format: uuid }
                 food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
-                weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
+                weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 } # NOTE: this endpoint is documented but not yet implemented server-side; field name not yet reconciled with the gross/net split introduced elsewhere in this spec
                 collection_date: { type: string, format: date }
                 notes: { type: [string, "null"] }
       responses:

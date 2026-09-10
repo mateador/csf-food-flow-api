@@ -50,6 +50,7 @@ from src.modules.locations.routes import locations_bp
 from src.modules.categories.routes import categories_bp
 from src.modules.reports.routes import reports_bp
 from src.modules.users.routes import users_bp
+from src.modules.tray_types.routes import tray_types_bp
 
 app.blueprint(auth_bp, url_prefix="/api/v1/auth")
 app.blueprint(me_bp, url_prefix="/api/v1")
@@ -58,6 +59,7 @@ app.blueprint(locations_bp, url_prefix="/api/v1/locations")
 app.blueprint(categories_bp, url_prefix="/api/v1/categories")
 app.blueprint(reports_bp, url_prefix="/api/v1/reports")
 app.blueprint(users_bp, url_prefix="/api/v1/users")
+app.blueprint(tray_types_bp, url_prefix="/api/v1/tray-types")
 
 
 @app.before_server_start

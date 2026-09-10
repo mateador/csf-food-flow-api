@@ -19,6 +19,9 @@ CATEGORIES = [
     ("FRESH", "Fresh"),
     ("FROZEN", "Frozen"),
     ("AMBIENT", "Ambient"),
+    ("VEG_FRUIT", "Veg/Fruit"),
+    ("OTHER_FRESH", "Other fresh (NOT Veg/Fruit)"),
+    ("BAKERY", "Bakery"),
 ]
 
 # One food centre + one hub, enough to exercise IN and OUT entries locally

@@ -1,3 +1,5 @@
+from datetime import date
+
 from sanic import Blueprint
 from sanic.response import json as json_response
 
@@ -7,7 +9,7 @@ from src.middleware.auth import get_current_user, require_auth
 entries_bp = Blueprint("entries", url_prefix="/entries")
 
 
-def _serialize_entry(row) -> dict:
+def _serialize_entry(row, trays: list | None = None) -> dict:
     return {
         "id": str(row["id"]),
         "client_uuid": str(row["client_uuid"]) if row["client_uuid"] else None,
@@ -18,7 +20,9 @@ def _serialize_entry(row) -> dict:
         else None,
         "name": row["name"],
         "food_category_code": row["food_category_code"],
-        "weight_kg": float(row["weight_kg"]),
+        "gross_weight_kg": float(row["gross_weight_kg"]),
+        "net_weight_kg": float(row["net_weight_kg"]),
+        "trays": trays if trays is not None else [],
         "collection_date": row["collection_date"].isoformat(),
         "notes": row["notes"],
         "status": row["status"],
@@ -30,6 +34,73 @@ def _serialize_entry(row) -> dict:
     }
 
 
+async def _validate_and_price_trays(conn, trays_input: list) -> tuple[list, float]:
+    """
+    trays_input: [{"tray_type_code": str, "quantity": int}, ...]
+    Returns (validated_trays_with_weight, total_tray_weight_kg).
+    Raises ValueError (caller turns this into a 422) on any problem --
+    unknown/inactive code, non-positive quantity, or the same tray type
+    listed twice (should be one line with a combined quantity instead).
+    """
+    if not trays_input:
+        return [], 0.0
+
+    tray_type_rows = await conn.fetch("SELECT code, weight_kg FROM tray_types WHERE active = true")
+    tray_weights = {r["code"]: float(r["weight_kg"]) for r in tray_type_rows}
+
+    seen_codes = set()
+    validated = []
+    total_tray_weight = 0.0
+
+    for item in trays_input:
+        code = item.get("tray_type_code")
+        quantity = item.get("quantity")
+
+        if code in seen_codes:
+            raise ValueError(f"Duplicate tray_type_code in trays: {code}")
+        seen_codes.add(code)
+
+        if code not in tray_weights:
+            raise ValueError(f"Unknown or inactive tray_type_code: {code}")
+        if not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError(f"quantity for tray {code} must be a positive integer")
+
+        tray_weight = tray_weights[code]
+        total_tray_weight += tray_weight * quantity
+        validated.append({"tray_type_code": code, "quantity": quantity, "weight_kg": tray_weight})
+
+    return validated, total_tray_weight
+
+
+async def _fetch_trays_for_entries(conn, entry_ids: list[str]) -> dict[str, list]:
+    """
+    Batched tray lookup for a set of entries -- one query for however many
+    entries are being returned, not one query per entry. Returns
+    {entry_id: [tray, ...]}; entries with no trays simply don't appear as
+    a key (callers should use .get(id, [])).
+    """
+    if not entry_ids:
+        return {}
+    rows = await conn.fetch(
+        """SELECT et.entry_id, et.tray_type_code, et.quantity, tt.weight_kg, tt.name
+           FROM entry_trays et
+           JOIN tray_types tt ON tt.code = et.tray_type_code
+           WHERE et.entry_id = ANY($1::uuid[])""",
+        entry_ids,
+    )
+    by_entry: dict[str, list] = {}
+    for r in rows:
+        by_entry.setdefault(str(r["entry_id"]), []).append(
+            {
+                "tray_type_code": r["tray_type_code"],
+                "tray_type_name": r["name"],
+                "quantity": r["quantity"],
+                "weight_kg": float(r["weight_kg"]),
+            }
+        )
+    return by_entry
+
+
 @entries_bp.post("/")
 @require_auth
 async def create_entry(request):
@@ -39,6 +110,10 @@ async def create_entry(request):
            destination_location_id must be null.
       FOOD_CENTRE: may create IN at any location, or OUT with a destination.
       ADMIN: may create either, for any valid location.
+
+    net_weight_kg is ALWAYS computed here, server-side, from the tray
+    selection -- a client-submitted net figure is never trusted, the same
+    principle as every other calculation in this API.
     """
     user = get_current_user(request)
     body = request.json or {}
@@ -48,18 +123,17 @@ async def create_entry(request):
     destination_location_id = body.get("destination_location_id")
     name = body.get("name")
     food_category_code = body.get("food_category_code")
-    weight_kg = body.get("weight_kg")
+    gross_weight_kg = body.get("gross_weight_kg")
     collection_date = body.get("collection_date")
     notes = body.get("notes")
     client_uuid = body.get("client_uuid")
+    trays_input = body.get("trays", [])
 
-    if not all([entry_type, location_id, name, food_category_code, weight_kg, collection_date]):
+    if not all([entry_type, location_id, name, food_category_code, gross_weight_kg, collection_date]):
         return json_response(
             {"error": {"code": "VALIDATION_ERROR", "message": "Missing required field"}},
             status=422,
         )
-
-    from datetime import date
 
     try:
         collection_date = date.fromisoformat(collection_date)
@@ -116,32 +190,63 @@ async def create_entry(request):
 
     async with pool().acquire() as conn:
         try:
-            row = await conn.fetchrow(
-                """INSERT INTO weigh_entries
-                   (client_uuid, entry_type, location_id, destination_location_id, name,
-                    food_category_code, weight_kg, collection_date, notes, created_by)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                   RETURNING *""",
-                client_uuid,
-                entry_type,
-                location_id,
-                destination_location_id,
-                name,
-                food_category_code,
-                weight_kg,
-                collection_date,
-                notes,
-                user["sub"],
+            validated_trays, total_tray_weight = await _validate_and_price_trays(conn, trays_input)
+        except ValueError as exc:
+            return json_response({"error": {"code": "VALIDATION_ERROR", "message": str(exc)}}, status=422)
+
+        net_weight_kg = round(float(gross_weight_kg) - total_tray_weight, 2)
+        if net_weight_kg < 0:
+            return json_response(
+                {
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "Selected trays weigh more than the gross weight entered -- "
+                        "check the weight and tray selection",
+                    }
+                },
+                status=422,
             )
+
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """INSERT INTO weigh_entries
+                       (client_uuid, entry_type, location_id, destination_location_id,
+                        name, food_category_code, gross_weight_kg, net_weight_kg,
+                        collection_date, notes, created_by)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                       RETURNING *""",
+                    client_uuid,
+                    entry_type,
+                    location_id,
+                    destination_location_id,
+                    name,
+                    food_category_code,
+                    gross_weight_kg,
+                    net_weight_kg,
+                    collection_date,
+                    notes,
+                    user["sub"],
+                )
+
+                for tray in validated_trays:
+                    await conn.execute(
+                        """INSERT INTO entry_trays (entry_id, tray_type_code, quantity)
+                           VALUES ($1, $2, $3)""",
+                        row["id"],
+                        tray["tray_type_code"],
+                        tray["quantity"],
+                    )
         except Exception as exc:
             # DB CHECK constraints are the final backstop -- if application
             # logic above ever has a gap, the database still refuses to
-            # store an invalid row.
+            # store an invalid row. The transaction rolls back entirely
+            # (entry + trays together) if anything here fails.
             return json_response(
                 {"error": {"code": "VALIDATION_ERROR", "message": str(exc)}}, status=422
             )
 
-    return json_response({"entry": _serialize_entry(row)}, status=201)
+    return json_response({"entry": _serialize_entry(row, validated_trays)}, status=201)
 
 
 @entries_bp.get("/")
@@ -178,7 +283,7 @@ async def list_entries(request):
         conditions.append(f"food_category_code = {add_param(args.get('food_category_code'))}")
 
     if args.get("week_start"):
-        from datetime import date, timedelta
+        from datetime import timedelta
 
         week_start = date.fromisoformat(args.get("week_start"))
         week_end = week_start + timedelta(days=6)
@@ -186,13 +291,9 @@ async def list_entries(request):
         conditions.append(f"collection_date <= {add_param(week_end)}")
     else:
         if args.get("from"):
-            from datetime import date as date_cls
-
-            conditions.append(f"collection_date >= {add_param(date_cls.fromisoformat(args.get('from')))}")
+            conditions.append(f"collection_date >= {add_param(date.fromisoformat(args.get('from')))}")
         if args.get("to"):
-            from datetime import date as date_cls
-
-            conditions.append(f"collection_date <= {add_param(date_cls.fromisoformat(args.get('to')))}")
+            conditions.append(f"collection_date <= {add_param(date.fromisoformat(args.get('to')))}")
 
     page = int(args.get("page", 1))
     limit = min(int(args.get("limit", 50)), 100)
@@ -213,9 +314,12 @@ async def list_entries(request):
             *params,
         )
 
+        entry_ids = [str(r["id"]) for r in rows]
+        trays_by_entry = await _fetch_trays_for_entries(conn, entry_ids)
+
     return json_response(
         {
-            "entries": [_serialize_entry(r) for r in rows],
+            "entries": [_serialize_entry(r, trays_by_entry.get(str(r["id"]), [])) for r in rows],
             "pagination": {"page": page, "limit": limit, "total": total},
         }
     )
@@ -262,26 +366,55 @@ async def bulk_sync_entries(request):
                 continue
 
             try:
-                from datetime import date
-
-                collection_date = date.fromisoformat(item.get("collection_date"))
-                row = await conn.fetchrow(
-                    """INSERT INTO weigh_entries
-                       (client_uuid, entry_type, location_id, destination_location_id, name,
-                        food_category_code, weight_kg, collection_date, notes, created_by)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                       RETURNING id""",
-                    client_uuid,
-                    item.get("entry_type"),
-                    item.get("location_id"),
-                    item.get("destination_location_id"),
-                    item.get("name"),
-                    item.get("food_category_code"),
-                    item.get("weight_kg"),
-                    collection_date,
-                    item.get("notes"),
-                    user["sub"],
+                validated_trays, total_tray_weight = await _validate_and_price_trays(
+                    conn, item.get("trays", [])
                 )
+            except ValueError as exc:
+                results.append({"client_uuid": client_uuid, "status": "error", "message": str(exc)})
+                continue
+
+            gross_weight_kg = item.get("gross_weight_kg")
+            net_weight_kg = round(float(gross_weight_kg) - total_tray_weight, 2) if gross_weight_kg else None
+            if net_weight_kg is not None and net_weight_kg < 0:
+                results.append(
+                    {
+                        "client_uuid": client_uuid,
+                        "status": "error",
+                        "message": "Selected trays weigh more than the gross weight entered",
+                    }
+                )
+                continue
+
+            try:
+                collection_date = date.fromisoformat(item.get("collection_date"))
+                async with conn.transaction():
+                    row = await conn.fetchrow(
+                        """INSERT INTO weigh_entries
+                           (client_uuid, entry_type, location_id, destination_location_id,
+                            name, food_category_code, gross_weight_kg, net_weight_kg,
+                            collection_date, notes, created_by)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                           RETURNING id""",
+                        client_uuid,
+                        item.get("entry_type"),
+                        item.get("location_id"),
+                        item.get("destination_location_id"),
+                        item.get("name"),
+                        item.get("food_category_code"),
+                        gross_weight_kg,
+                        net_weight_kg,
+                        collection_date,
+                        item.get("notes"),
+                        user["sub"],
+                    )
+                    for tray in validated_trays:
+                        await conn.execute(
+                            """INSERT INTO entry_trays (entry_id, tray_type_code, quantity)
+                               VALUES ($1, $2, $3)""",
+                            row["id"],
+                            tray["tray_type_code"],
+                            tray["quantity"],
+                        )
                 results.append(
                     {"client_uuid": client_uuid, "status": "created", "id": str(row["id"])}
                 )
