@@ -11,15 +11,15 @@ import structlog
 logger = structlog.get_logger()
 
 
-async def send_magic_link_email(to_email: str, magic_link_url: str) -> None:
+async def send_login_code_email(to_email: str, code: str) -> None:
     api_key = os.environ.get("RESEND_API_KEY")
     from_email = os.environ.get("EMAIL_FROM", "no-reply@example.org")
 
     if not api_key:
         # Local dev fallback -- no Resend account needed to develop against
-        # the auth flow. The link is right here in the terminal.
-        logger.info("magic_link_email_console_fallback", to=to_email, url=magic_link_url)
-        print(f"\n{'=' * 60}\nMAGIC LINK (console fallback, no RESEND_API_KEY set)\nTo: {to_email}\nLink: {magic_link_url}\n{'=' * 60}\n")
+        # the auth flow. The code is right here in the terminal.
+        logger.info("login_code_email_console_fallback", to=to_email, code=code)
+        print(f"\n{'=' * 60}\nLOGIN CODE (console fallback, no RESEND_API_KEY set)\nTo: {to_email}\nCode: {code}\n{'=' * 60}\n")
         return
 
     import resend
@@ -29,12 +29,12 @@ async def send_magic_link_email(to_email: str, magic_link_url: str) -> None:
         {
             "from": from_email,
             "to": to_email,
-            "subject": "Your CSF Food Flow sign-in link",
+            "subject": "Your CSF Food Flow sign-in code",
             "html": (
-                f'<p>Click below to sign in. This link expires in 15 minutes '
-                f'and can only be used once.</p>'
-                f'<p><a href="{magic_link_url}">Sign in to CSF Food Flow</a></p>'
+                f'<p>Your sign-in code is:</p>'
+                f'<p style="font-size: 32px; font-weight: bold; letter-spacing: 4px;">{code}</p>'
+                f'<p>This code expires in 10 minutes and can only be used once.</p>'
             ),
         }
     )
-    logger.info("magic_link_email_sent", to=to_email)
+    logger.info("login_code_email_sent", to=to_email)

@@ -4,66 +4,72 @@ from sanic import Blueprint
 from sanic.response import json as json_response
 
 from src.db.client import pool
-from src.middleware.auth import SESSION_COOKIE_NAME, get_current_user, require_auth
-from src.modules.auth.email import send_magic_link_email
+from src.middleware.auth import SESSION_COOKIE_NAME
+from src.modules.auth.email import send_login_code_email
 from src.modules.auth.service import (
-    create_magic_link_token,
+    can_request_new_code,
+    create_login_code,
     issue_session_jwt,
-    verify_and_consume_magic_link_token,
+    verify_and_consume_login_code,
 )
 
 auth_bp = Blueprint("auth", url_prefix="/auth")
 
-MAGIC_LINK_BASE_URL = os.environ.get("MAGIC_LINK_BASE_URL", "http://localhost:5173")
 IS_PRODUCTION = os.environ.get("SANIC_DEV", "false").lower() != "true"
 
 
-@auth_bp.post("/magic-link/request")
-async def request_magic_link(request):
+@auth_bp.post("/code/request")
+async def request_login_code(request):
     body = request.json or {}
     email = (body.get("email") or "").strip().lower()
 
     # Always return the same generic response whether or not the email
-    # exists or is active -- prevents user enumeration via response timing
-    # or content differences.
+    # exists, is active, or is currently rate-limited -- prevents user
+    # enumeration via response timing or content differences.
     if email:
         async with pool().acquire() as conn:
             user_row = await conn.fetchrow(
                 "SELECT id FROM users WHERE email = $1 AND active = true", email
             )
-        if user_row:
-            raw_token = await create_magic_link_token(str(user_row["id"]))
-            magic_link_url = f"{MAGIC_LINK_BASE_URL}/auth/verify?token={raw_token}"
-            await send_magic_link_email(email, magic_link_url)
+        if user_row and await can_request_new_code(str(user_row["id"])):
+            raw_code = await create_login_code(str(user_row["id"]), email)
+            await send_login_code_email(email, raw_code)
 
     return json_response({"status": "requested"})
 
 
-@auth_bp.post("/magic-link/verify")
-async def verify_magic_link(request):
+@auth_bp.post("/code/verify")
+async def verify_login_code(request):
     body = request.json or {}
-    token = body.get("token")
-    if not token:
+    email = (body.get("email") or "").strip().lower()
+    code = (body.get("code") or "").strip()
+
+    if not email or not code:
         return json_response(
-            {"error": {"code": "VALIDATION_ERROR", "message": "token is required"}},
+            {"error": {"code": "VALIDATION_ERROR", "message": "email and code are required"}},
             status=422,
         )
 
-    result = await verify_and_consume_magic_link_token(token)
+    result = await verify_and_consume_login_code(email, code)
 
-    if result == "ALREADY_USED":
+    if result == "TOO_MANY_ATTEMPTS":
         return json_response(
-            {"error": {"code": "ALREADY_USED", "message": "This link has already been used."}},
+            {
+                "error": {
+                    "code": "TOO_MANY_ATTEMPTS",
+                    "message": "Too many incorrect attempts. Request a new code.",
+                }
+            },
             status=401,
         )
     if result == "EXPIRED":
         return json_response(
-            {"error": {"code": "EXPIRED", "message": "This link has expired \u2014 request a new one."}},
+            {"error": {"code": "EXPIRED", "message": "This code has expired \u2014 request a new one."}},
             status=401,
         )
-    if not result:
+    if not isinstance(result, dict):
         return json_response(
-            {"error": {"code": "UNAUTHORIZED", "message": "Invalid or expired token"}},
+            {"error": {"code": "INVALID_CODE", "message": "Incorrect code."}},
             status=401,
         )
 
@@ -92,7 +98,7 @@ async def verify_magic_link(request):
         path="/",
         httponly=True,
         secure=IS_PRODUCTION,
-        samesite="None" if IS_PRODUCTION else "Lax",
+        samesite="Lax",
         max_age=int(os.environ.get("ACCESS_TOKEN_TTL_MINUTES", "720")) * 60,
     )
     return response

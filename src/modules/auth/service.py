@@ -1,7 +1,7 @@
 """
-Auth service: magic-link token generation/validation, and JWT session
-issuance. No passwords anywhere in this module -- see the User schema note
-in the spec, password_hash was deliberately removed.
+Auth service: login-code generation/validation, and JWT session issuance.
+No passwords anywhere in this module -- see the User schema note in the
+spec, password_hash was deliberately removed.
 """
 import hashlib
 import os
@@ -12,84 +12,116 @@ import jwt
 
 from src.db.client import pool
 
-MAGIC_LINK_TTL_MINUTES = int(os.environ.get("MAGIC_LINK_TTL_MINUTES", "15"))
+LOGIN_CODE_TTL_MINUTES = int(os.environ.get("LOGIN_CODE_TTL_MINUTES", "10"))
 ACCESS_TOKEN_TTL_MINUTES = int(os.environ.get("ACCESS_TOKEN_TTL_MINUTES", "720"))
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGORITHM = "HS256"
 
-
-def _hash_token(raw_token: str) -> str:
-    # Tokens are single-use and short-lived, so a fast hash (not bcrypt) is
-    # the right call here -- this isn't a password, it's a one-time nonce.
-    # sha256 is enough to make the stored value useless if the DB leaks,
-    # while keeping verification cheap.
-    return hashlib.sha256(raw_token.encode()).hexdigest()
+# A 4-digit code has only 10,000 possible values -- unlike the old random
+# token, this needs real brute-force protection, not just a fast hash.
+MAX_CODE_ATTEMPTS = 5
+MAX_CODE_REQUESTS_PER_WINDOW = 3
+CODE_REQUEST_WINDOW_MINUTES = 10
 
 
-async def create_magic_link_token(user_id: str) -> str:
-    """Returns the RAW token (only time it ever exists in plaintext)."""
-    raw_token = secrets.token_urlsafe(32)
-    token_hash = _hash_token(raw_token)
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=MAGIC_LINK_TTL_MINUTES)
+def _hash_code(email: str, code: str) -> str:
+    # Salted with the email so the same 4-digit code for two different
+    # users never produces the same hash. This does NOT make brute-forcing
+    # a single row computationally hard (10,000 hashes is trivial to
+    # compute either way) -- it only prevents one precomputed table from
+    # working against every user's row at once. The real defenses against
+    # brute force are attempts-lockout and expiry, not this hash.
+    return hashlib.sha256(f"{email}:{code}".encode()).hexdigest()
 
+
+async def can_request_new_code(user_id: str) -> bool:
+    """Rate limit on REQUESTS, not attempts -- stops someone from resetting
+    their own attempts budget by just requesting a fresh code repeatedly."""
     async with pool().acquire() as conn:
-        await conn.execute(
-            """INSERT INTO magic_link_tokens (user_id, token_hash, expires_at)
-               VALUES ($1, $2, $3)""",
+        count = await conn.fetchval(
+            """SELECT count(*) FROM login_codes
+               WHERE user_id = $1
+                 AND created_at > now() - make_interval(mins => $2)""",
             user_id,
-            token_hash,
-            expires_at,
+            CODE_REQUEST_WINDOW_MINUTES,
         )
-    return raw_token
+    return count < MAX_CODE_REQUESTS_PER_WINDOW
 
 
-async def verify_and_consume_magic_link_token(raw_token: str) -> dict | str | None:
-    """
-    Validates a token, marks it used, updates last_login_at, all in one
-    transaction.
-
-    Returns:
-        dict            -- the user row, on success
-        "ALREADY_USED"  -- token exists but was already consumed
-        "EXPIRED"       -- token exists, unused, but past its expiry
-        None            -- token doesn't exist at all (no security value
-                            in distinguishing this from the two above for
-                            a bad-faith or guessed token)
-    """
-    token_hash = _hash_token(raw_token)
+async def create_login_code(user_id: str, email: str) -> str:
+    """Returns the RAW 4-digit code (only time it ever exists in plaintext)."""
+    raw_code = f"{secrets.randbelow(10000):04d}"
+    code_hash = _hash_code(email, raw_code)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=LOGIN_CODE_TTL_MINUTES)
 
     async with pool().acquire() as conn:
         async with conn.transaction():
-            token_row = await conn.fetchrow(
-                """SELECT id, user_id, expires_at, used_at
-                   FROM magic_link_tokens
-                   WHERE token_hash = $1
+            # Only one code should ever be valid at a time -- invalidate
+            # anything still active for this user before issuing a new one.
+            await conn.execute(
+                "UPDATE login_codes SET used_at = now() WHERE user_id = $1 AND used_at IS NULL",
+                user_id,
+            )
+            await conn.execute(
+                """INSERT INTO login_codes (user_id, code_hash, expires_at)
+                   VALUES ($1, $2, $3)""",
+                user_id,
+                code_hash,
+                expires_at,
+            )
+    return raw_code
+
+
+async def verify_and_consume_login_code(email: str, raw_code: str) -> dict | str:
+    """
+    Returns:
+        dict                 -- the user row, on success
+        "INVALID_CODE"       -- wrong code, or no active code exists at all
+        "TOO_MANY_ATTEMPTS"  -- the active code was locked out after
+                                 MAX_CODE_ATTEMPTS wrong guesses
+        "EXPIRED"             -- code existed but is past its expiry
+    """
+    code_hash = _hash_code(email, raw_code)
+
+    async with pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """SELECT lc.id, lc.user_id, lc.code_hash, lc.expires_at, lc.attempts
+                   FROM login_codes lc
+                   JOIN users u ON u.id = lc.user_id
+                   WHERE u.email = $1 AND lc.used_at IS NULL
+                   ORDER BY lc.created_at DESC
+                   LIMIT 1
                    FOR UPDATE""",
-                token_hash,
+                email,
             )
 
-            if not token_row:
-                return None
-            if token_row["used_at"] is not None:
-                return "ALREADY_USED"
-            if token_row["expires_at"] < datetime.now(timezone.utc):
+            if not row:
+                return "INVALID_CODE"
+            if row["attempts"] >= MAX_CODE_ATTEMPTS:
+                return "TOO_MANY_ATTEMPTS"
+            if row["expires_at"] < datetime.now(timezone.utc):
                 return "EXPIRED"
 
+            if row["code_hash"] != code_hash:
+                await conn.execute(
+                    "UPDATE login_codes SET attempts = attempts + 1 WHERE id = $1",
+                    row["id"],
+                )
+                return "INVALID_CODE"
+
             await conn.execute(
-                "UPDATE magic_link_tokens SET used_at = now() WHERE id = $1",
-                token_row["id"],
+                "UPDATE login_codes SET used_at = now() WHERE id = $1", row["id"]
             )
 
             user_row = await conn.fetchrow(
-                "SELECT * FROM users WHERE id = $1 AND active = true",
-                token_row["user_id"],
+                "SELECT * FROM users WHERE id = $1 AND active = true", row["user_id"]
             )
             if not user_row:
-                return None
+                return "INVALID_CODE"
 
             await conn.execute(
-                "UPDATE users SET last_login_at = now() WHERE id = $1",
-                user_row["id"],
+                "UPDATE users SET last_login_at = now() WHERE id = $1", user_row["id"]
             )
 
             return dict(user_row)

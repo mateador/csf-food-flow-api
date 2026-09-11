@@ -15,10 +15,8 @@ services:
         sync: false
       - key: JWT_SECRET
         sync: false
-      - key: MAGIC_LINK_BASE_URL
-        sync: false
-      - key: MAGIC_LINK_TTL_MINUTES
-        value: "15"
+      - key: LOGIN_CODE_TTL_MINUTES
+        value: "10"
       - key: ACCESS_TOKEN_TTL_MINUTES
         value: "720"
       - key: RESEND_API_KEY

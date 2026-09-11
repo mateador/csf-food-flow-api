@@ -24,10 +24,11 @@ components:
       in: cookie
       name: csf_session
       description: >
-        httpOnly, Secure, SameSite=None session cookie, set by
-        /auth/magic-link/verify. Required cross-origin config: CORS_ORIGIN
-        must be the PWA's exact origin (never "*") and requests must be
-        made with credentials: 'include'.
+        httpOnly, Secure, SameSite=Lax session cookie, set by
+        /auth/code/verify. The PWA and API are served through a same-origin
+        Netlify proxy (see netlify.toml in the PWA repo), which is what
+        allows SameSite=Lax here rather than the cross-site None -- see
+        that repo's README for why.
 
   schemas:
     Role:
@@ -242,10 +243,10 @@ paths:
                   status: { type: string, enum: [ok] }
                   version: { type: string }
 
-  /auth/magic-link/request:
+  /auth/code/request:
     post:
-      operationId: requestMagicLink
-      summary: Start passwordless sign-in by emailing a one-time magic link
+      operationId: requestLoginCode
+      summary: Start passwordless sign-in by emailing a 4-digit one-time code
       security: []
       requestBody:
         required: true
@@ -259,8 +260,11 @@ paths:
       responses:
         "200":
           description: >
-            Always a generic success, whether or not the email exists or is
-            active, to avoid user enumeration.
+            Always a generic success, whether or not the email exists, is
+            active, or is currently rate-limited, to avoid user
+            enumeration. Rate limit: at most 3 code requests per user per
+            10-minute window; requests beyond that silently do not send a
+            new code but still return this same response.
           content:
             application/json:
               schema:
@@ -269,10 +273,10 @@ paths:
                 properties:
                   status: { type: string, enum: [requested] }
 
-  /auth/magic-link/verify:
+  /auth/code/verify:
     post:
-      operationId: verifyMagicLink
-      summary: Validate a one-time magic-link token and establish a session
+      operationId: verifyLoginCode
+      summary: Validate a 4-digit one-time code and establish a session
       security: []
       requestBody:
         required: true
@@ -280,14 +284,18 @@ paths:
           application/json:
             schema:
               type: object
-              required: [token]
+              required: [email, code]
               properties:
-                token: { type: string }
+                email: { type: string, format: email }
+                code:
+                  type: string
+                  pattern: "^[0-9]{4}$"
+                  description: The 4-digit code emailed to this address.
       responses:
         "200":
           description: >
             Sets the httpOnly session cookie via Set-Cookie. Response body
-            does not include the token itself.
+            does not include the code itself.
           content:
             application/json:
               schema:
@@ -296,7 +304,10 @@ paths:
                 properties:
                   user: { $ref: "#/components/schemas/User" }
         "401":
-          description: Token expired, already used, or invalid
+          description: >
+            Code incorrect, expired, or locked out after too many wrong
+            attempts (5 max per issued code) -- error.code distinguishes
+            INVALID_CODE, EXPIRED, and TOO_MANY_ATTEMPTS.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
