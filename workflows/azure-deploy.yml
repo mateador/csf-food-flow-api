@@ -1,0 +1,40 @@
+name: Deploy to Azure App Service
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: 'csf-food-flow-api-als'
+          slot-name: 'production'
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: .
+
+#      - name: Run Database Migrations and Seed
+#        run: |
+#          echo "Running migrations on production database..."
+#          python -m src.db.migrate
+#          python -m src.db.seed
+#        env:
+#          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+#          DIRECT_URL: ${{ secrets.DIRECT_URL }}
