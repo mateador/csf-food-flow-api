@@ -1,17 +1,25 @@
 import csv
 import io
 from datetime import date, timedelta
+from decimal import Decimal
 
 from sanic import Blueprint
 from sanic.response import json as json_response, text as text_response
 
 from src.db.client import pool
-from src.middleware.auth import get_current_user, require_auth, require_role
+from src.middleware.auth import require_auth, require_role
 
 reports_bp = Blueprint("reports", url_prefix="/reports")
 
-def _empty_category_totals(category_codes: list[str]) -> dict:
-    return {code: 0.0 for code in category_codes}
+def _empty_category_totals(category_codes: list[str]) -> dict[str, Decimal]:
+    return {code: Decimal("0") for code in category_codes}
+
+
+def _as_kg(totals: dict[str, Decimal]) -> dict[str, float]:
+    # Weights are NUMERIC(10, 2) in the database and are summed as Decimal,
+    # so totals are exact. Converting to float only at the very end keeps
+    # values like 0.1 + 0.2 from reaching the PWA as 0.30000000000000004.
+    return {code: float(total.quantize(Decimal("0.01"))) for code, total in totals.items()}
 
 
 async def _compute_weekly_totals(week_start: date, location_filter: str | None):
@@ -39,12 +47,21 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
         )
         location_rows = await conn.fetch("SELECT id, name FROM locations")
         # food_categories is the single source of truth for which codes
-        # exist -- querying it here (rather than a hardcoded list) is what
-        # keeps this report correct as categories are added or retired,
-        # instead of throwing a KeyError the first time a new category is
-        # actually used.
-        category_rows = await conn.fetch("SELECT code FROM food_categories WHERE active = true")
-        category_codes = [r["code"] for r in category_rows]
+        # exist, so the report follows it as categories are added or
+        # retired. Active categories always appear (as 0 if unused), so the
+        # report has a stable shape week to week.
+        category_rows = await conn.fetch(
+            "SELECT code FROM food_categories WHERE active = true ORDER BY code"
+        )
+
+    # A retired category can still have entries in a past week. Those
+    # entries are real food that moved, so they're reported under their
+    # own code rather than dropped -- and a retired code never crashes the
+    # report.
+    category_codes = [r["code"] for r in category_rows]
+    for code in sorted({row["food_category_code"] for row in rows}):
+        if code not in category_codes:
+            category_codes.append(code)
 
     location_names = {str(r["id"]): r["name"] for r in location_rows}
 
@@ -67,7 +84,7 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
         # already subtracted -- is the meaningful reporting figure. Gross
         # weight (still available on the entry itself) still includes
         # whatever trays carried it.
-        weight = float(row["net_weight_kg"])
+        weight = row["net_weight_kg"]
         code = row["food_category_code"]
         if row["entry_type"] == "IN":
             totals_in[code] += weight
@@ -79,8 +96,15 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
     return {
         "week_start": week_start.isoformat(),
         "week_end": week_end.isoformat(),
-        "totals": {"in_by_category": totals_in, "out_by_category": totals_out},
-        "by_location": list(by_location.values()),
+        "totals": {"in_by_category": _as_kg(totals_in), "out_by_category": _as_kg(totals_out)},
+        "by_location": [
+            {
+                **loc,
+                "in_by_category": _as_kg(loc["in_by_category"]),
+                "out_by_category": _as_kg(loc["out_by_category"]),
+            }
+            for loc in by_location.values()
+        ],
     }
 
 
@@ -97,7 +121,7 @@ def _validate_week_start(raw: str) -> tuple[date | None, str | None]:
 @reports_bp.get("/weekly")
 @require_auth
 async def weekly_report(request):
-    user = get_current_user(request)
+    user = request.ctx.user
     raw_week_start = request.args.get("week_start")
     if not raw_week_start:
         return json_response(

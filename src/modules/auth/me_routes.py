@@ -2,7 +2,7 @@ from sanic import Blueprint
 from sanic.response import json as json_response
 
 from src.db.client import pool
-from src.middleware.auth import get_current_user, require_auth
+from src.middleware.auth import require_auth
 
 me_bp = Blueprint("me")
 
@@ -10,7 +10,7 @@ me_bp = Blueprint("me")
 @me_bp.get("/me")
 @require_auth
 async def get_me(request):
-    session = get_current_user(request)
+    session = request.ctx.user
     async with pool().acquire() as conn:
         user_row = await conn.fetchrow("SELECT * FROM users WHERE id = $1", session["sub"])
     if not user_row:

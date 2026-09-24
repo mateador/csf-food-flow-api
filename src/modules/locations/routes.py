@@ -2,7 +2,7 @@ from sanic import Blueprint
 from sanic.response import json as json_response
 
 from src.db.client import pool
-from src.middleware.auth import get_current_user, require_auth, require_role
+from src.middleware.auth import require_auth, require_role
 
 locations_bp = Blueprint("locations", url_prefix="/locations")
 
@@ -15,7 +15,7 @@ def _serialize_location(row) -> dict:
 @require_auth
 async def list_locations(request):
     """HUB users receive only their own assigned location, never the full list."""
-    user = get_current_user(request)
+    user = request.ctx.user
     args = request.args
 
     async with pool().acquire() as conn:

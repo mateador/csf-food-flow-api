@@ -4,7 +4,7 @@ from sanic import Blueprint
 from sanic.response import json as json_response
 
 from src.db.client import pool
-from src.middleware.auth import get_current_user, require_auth
+from src.middleware.auth import require_auth
 
 entries_bp = Blueprint("entries", url_prefix="/entries")
 
@@ -115,7 +115,7 @@ async def create_entry(request):
     selection -- a client-submitted net figure is never trusted, the same
     principle as every other calculation in this API.
     """
-    user = get_current_user(request)
+    user = request.ctx.user
     body = request.json or {}
 
     entry_type = body.get("entry_type")
@@ -256,7 +256,7 @@ async def list_entries(request):
     HUB is restricted to their own location_id server-side -- any
     location_id query param they pass is ignored, never trusted.
     """
-    user = get_current_user(request)
+    user = request.ctx.user
     args = request.args
 
     conditions = ["1=1"]
@@ -334,7 +334,7 @@ async def bulk_sync_entries(request):
     behaviour the PWA's offline queue depends on when retrying a sync that
     partially succeeded before a connection drop.
     """
-    user = get_current_user(request)
+    user = request.ctx.user
     body = request.json or {}
     entries = body.get("entries", [])
 

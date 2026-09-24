@@ -235,12 +235,11 @@ session cookie first-party in Safari and private browsing.
 - **A2** — Email sending uses Resend's free tier (3,000/month, 100/day)
   with a console-log fallback for local dev. A Resend failure is logged at
   error level and never breaks the code-request endpoint.
-- **A3** — The session cookie is a JWT, not a server-side session store.
-  There is no "sign out everywhere" capability in V1 — the cookie simply
-  expires. It also means deactivating a user doesn't end a session they
-  already have; it lasts until the cookie expires
-  (`ACCESS_TOKEN_TTL_MINUTES`). `tests/test_auth.py` records this as an
-  expected failure.
+- **A3** — The session cookie is a JWT, but it only proves identity. On
+  every request the API reads the user's current status, role and hub
+  from the database, so deactivating a user, changing their role or
+  moving them to another hub takes effect on their next request. There
+  is still no "sign out everywhere" button separate from deactivation.
 - **A4** — Automated tests cover auth, entries, bulk sync, reports and
   admin endpoints against a real Postgres database (see "Running the
   tests"). Tests run locally; there is no CI pipeline yet. Known bugs are

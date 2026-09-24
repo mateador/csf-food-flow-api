@@ -56,7 +56,7 @@ async def test_totals_use_net_weight(api, world):
     res = await api.get(WEEKLY, user=world["admin"], params={"week_start": MONDAY.isoformat()})
 
     assert res.status == 200
-    assert res.json["totals"]["in_by_category"]["FRESH"] == pytest.approx(11.3)
+    assert res.json["totals"]["in_by_category"]["FRESH"] == 11.3
 
 
 async def test_in_and_out_are_totalled_separately_per_location(api, world):
@@ -117,12 +117,6 @@ async def test_report_includes_newly_added_categories(api, db, world):
     assert res.json["totals"]["in_by_category"]["TEST_DAIRY"] == 6.0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN BUG: the report only builds totals for ACTIVE categories, so an "
-    "entry in a category that has since been retired raises KeyError and the "
-    "report returns 500 for that week.",
-)
 async def test_report_survives_a_retired_category(api, db, world):
     await _record(api, world["hub_user"], world["hub"], food_category_code="BAKERY",
                   gross_weight_kg=6.0)
@@ -132,6 +126,28 @@ async def test_report_survives_a_retired_category(api, db, world):
 
     assert res.status == 200
     assert res.json["totals"]["in_by_category"]["BAKERY"] == 6.0
+
+
+async def test_retired_categories_without_entries_are_left_out(api, db, world):
+    await db.execute("UPDATE food_categories SET active = false WHERE code = 'BAKERY'")
+
+    res = await api.get(WEEKLY, user=world["admin"], params={"week_start": MONDAY.isoformat()})
+
+    assert "BAKERY" not in res.json["totals"]["in_by_category"]
+    assert res.json["totals"]["in_by_category"]["FRESH"] == 0.0
+
+
+async def test_totals_are_exact_to_two_decimal_places(api, world):
+    """Summing 0.1 and 0.2 as floats gives 0.30000000000000004, which the
+    report page would display as-is."""
+    await _record(api, world["hub_user"], world["hub"], gross_weight_kg=0.1)
+    await _record(api, world["hub_user"], world["hub"], gross_weight_kg=0.2)
+
+    res = await api.get(WEEKLY, user=world["admin"], params={"week_start": MONDAY.isoformat()})
+
+    assert res.json["totals"]["in_by_category"]["FRESH"] == 0.3
+    by_location = res.json["by_location"][0]
+    assert by_location["in_by_category"]["FRESH"] == 0.3
 
 
 # --- CSV export -----------------------------------------------------------

@@ -4,6 +4,7 @@ possible values, so the security of sign-in rests on the limits around
 it -- expiry, single use, attempt lockout, request throttling -- and on
 never revealing which emails have accounts. Each of those gets a test.
 """
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -97,7 +98,7 @@ async def test_request_sends_nothing_to_a_deactivated_user(api, make_user, sent_
 async def test_requests_are_throttled_to_three_per_window(
     api, make_user, sent_codes, fixed_codes
 ):
-    fixed_codes(1111, 2222, 3333)  # distinct values, see the xfail test below
+    fixed_codes(1111, 2222, 3333)
     await make_user("ADMIN", email="alex@example.org")
 
     responses = [await api.post(REQUEST, json={"email": "alex@example.org"}) for _ in range(4)]
@@ -243,12 +244,6 @@ async def test_verify_requires_email_and_code(api, body):
     assert res.json["error"]["code"] == "VALIDATION_ERROR"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN BUG: login_codes.code_hash has a UNIQUE constraint, and the hash "
-    "is sha256(email:code), so re-issuing a code value a user has had before "
-    "raises UniqueViolationError and the request endpoint returns 500.",
-)
 async def test_same_code_value_can_be_issued_to_a_user_twice(
     api, make_user, sent_codes, fixed_codes
 ):
@@ -260,9 +255,11 @@ async def test_same_code_value_can_be_issued_to_a_user_twice(
     await api.post(VERIFY, json={"email": "alex@example.org", "code": "1234"})
 
     res = await api.post(REQUEST, json={"email": "alex@example.org"})
+    signed_in = await api.post(VERIFY, json={"email": "alex@example.org", "code": "1234"})
 
     assert res.status == 200
     assert len(sent_codes) == 2
+    assert signed_in.status == 200
 
 
 # --- Sessions ---------------------------------------------------------------
@@ -310,16 +307,52 @@ async def test_session_signed_with_another_secret_is_rejected(api, make_user):
     assert res.status == 401
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN GAP: the session JWT is checked for signature and expiry only, "
-    "so a deactivated user keeps access until the cookie expires (up to "
-    "ACCESS_TOKEN_TTL_MINUTES). See README A3.",
-)
 async def test_deactivated_user_loses_access_immediately(api, db, make_user):
     user = await make_user("ADMIN")
     await db.execute("UPDATE users SET active = false WHERE id = $1", user["id"])
 
     res = await api.get("/api/v1/users/", user=user)
+
+    assert res.status == 401
+
+
+async def test_role_change_takes_effect_on_the_next_request(api, db, make_user):
+    """The cookie still says ADMIN; the database now says HUB. The database wins."""
+    user = await make_user("ADMIN")
+    location = await db.fetchval(
+        "INSERT INTO locations (name, type) VALUES ('Moved Hub', 'HUB') RETURNING id"
+    )
+    await db.execute(
+        "UPDATE users SET role = 'HUB', location_id = $2 WHERE id = $1", user["id"], location
+    )
+
+    res = await api.get("/api/v1/users/", user=user)
+
+    assert res.status == 403
+
+
+async def test_hub_reassignment_takes_effect_on_the_next_request(api, db, world):
+    """A hub user moved to another hub records at the new hub straight away,
+    and can no longer record at the old one."""
+    from tests.conftest import entry_payload
+
+    hub_user = world["hub_user"]  # session issued while assigned to world["hub"]
+    await db.execute(
+        "UPDATE users SET location_id = $2 WHERE id = $1", hub_user["id"], world["other_hub"]
+    )
+
+    old = await api.post("/api/v1/entries/", user=hub_user, json=entry_payload(world["hub"]))
+    new = await api.post(
+        "/api/v1/entries/", user=hub_user, json=entry_payload(world["other_hub"])
+    )
+
+    assert old.status == 403
+    assert new.status == 201
+
+
+async def test_session_for_a_user_that_does_not_exist_is_rejected(api):
+    ghost = {"id": uuid.uuid4(), "role": "ADMIN", "location_id": None}
+
+    res = await api.get("/api/v1/users/", user=ghost)
 
     assert res.status == 401
