@@ -10,3 +10,5 @@ __pycache__/
 .pytest_cache/
 docs/
 README.md
+tests/
+pytest.ini

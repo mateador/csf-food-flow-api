@@ -50,6 +50,9 @@ src/
 docs/
   openapi.yaml            -- canonical API contract
   CONTRACT.md             -- contract sync discipline between repos
+tests/                    -- pytest suite, runs against a real Postgres
+pytest.ini                -- pytest configuration
+requirements-dev.txt      -- test dependencies (not in the Docker image)
 ```
 
 ## Prerequisites
@@ -57,7 +60,7 @@ docs/
 - Python 3.12+
 - A Postgres database — a free [Neon](https://neon.tech) project
   (recommended) or a local Postgres install
-- Docker, only if you want to run the container image locally
+- Docker, to run the test database or the container image locally
 
 ## Environment Setup
 
@@ -93,6 +96,33 @@ docker run --rm -p 8000:8000 --env-file .env csf-api
 ```
 
 The container listens on port 8000, the same port Azure's ingress targets.
+
+## Running the tests
+
+The suite runs against a real, disposable Postgres database — never Neon.
+It drops and recreates that database's schema on every run, so it refuses
+to start unless `TEST_DATABASE_URL` is set and the database name contains
+`test`.
+
+```bash
+# One-off: start a throwaway Postgres on port 5433
+docker run -d --name csf-test-db \
+  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=csf_test \
+  -p 5433:5432 postgres:16
+
+pip install -r requirements-dev.txt
+
+# TEST_DATABASE_URL can also live in .env (see .env.example)
+export TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5433/csf_test
+pytest
+```
+
+Afterwards, `docker stop csf-test-db` stops it and `docker start csf-test-db`
+brings it back. No real email is sent during tests.
+
+Tests marked `xfail` describe a known bug: they state the correct
+behaviour, and are expected to fail until that bug is fixed. Each one's
+`reason` says what's wrong.
 
 ## Authentication
 
@@ -207,13 +237,13 @@ session cookie first-party in Safari and private browsing.
   error level and never breaks the code-request endpoint.
 - **A3** — The session cookie is a JWT, not a server-side session store.
   There is no "sign out everywhere" capability in V1 — the cookie simply
-  expires. Worth adding a revocation list if that becomes a real
-  requirement.
-- **A4** — No automated tests yet. Every endpoint and role rule was
-  verified manually against a real Postgres instance during development
-  (HUB/FOOD_CENTRE/ADMIN role enforcement, Monday validation, bulk-sync
-  idempotency, and a real role-leak bug in the weekly report found and
-  fixed this way). Converting that manual verification into a `pytest`
-  suite is the highest-value next step.
+  expires. It also means deactivating a user doesn't end a session they
+  already have; it lasts until the cookie expires
+  (`ACCESS_TOKEN_TTL_MINUTES`). `tests/test_auth.py` records this as an
+  expected failure.
+- **A4** — Automated tests cover auth, entries, bulk sync, reports and
+  admin endpoints against a real Postgres database (see "Running the
+  tests"). Tests run locally; there is no CI pipeline yet. Known bugs are
+  recorded as `xfail` tests rather than left undocumented.
 - **A5** — `docs/openapi.yaml` sync between this repo and the PWA repo is
   a manual discipline (see `docs/CONTRACT.md`), not CI-enforced.
