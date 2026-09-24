@@ -31,10 +31,11 @@ LOCATIONS = [
     ("Example Hub", "HUB"),
 ]
 
-# The initial admin account. No password -- auth is magic-link only, so
-# this user signs in the same way anyone else does: request a link at
-# /login, no separate bootstrap credential needed.
-ADMIN_EMAIL = os.environ.get("SEED_ADMIN_EMAIL", "alexandre.als@gmail.com")
+# The initial admin account. No password -- auth is an emailed login code,
+# so this user signs in the same way anyone else does: request a code at
+# /login, no separate bootstrap credential needed. Set SEED_ADMIN_EMAIL to
+# a real address before seeding a fresh database.
+ADMIN_EMAIL = os.environ.get("SEED_ADMIN_EMAIL", "admin@example.org")
 ADMIN_NAME = "CSF Admin"
 
 

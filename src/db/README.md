@@ -8,9 +8,13 @@ patterns favor transparent, hand-written SQL).
 
 ## Files
 
-- `migrations/0001_init.sql` — the schema. All 6 entities (`locations`,
-  `users`, `food_categories`, `weigh_entries`, `audit_log`,
+- `migrations/0001_init.sql` — the base schema. All 6 original entities
+  (`locations`, `users`, `food_categories`, `weigh_entries`, `audit_log`,
   `magic_link_tokens`), every index and constraint from the spec.
+- `migrations/0002`–`0005` — later changes, applied in order: the
+  mandatory `name` field, three extra food categories, tray types with
+  the gross/net weight split, and `login_codes` replacing
+  `magic_link_tokens`.
 - `migrate.py` — runner. Tracks applied migrations in a `schema_migrations`
   table (version + timestamp). Not Alembic, deliberately — see the root
   README for why.

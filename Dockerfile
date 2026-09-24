@@ -1,20 +1,26 @@
 # Use official lightweight Python image
 FROM python:3.12-slim
 
-# Set working directory
+# Send logs straight to stdout (visible in Azure's log stream) and skip
+# writing .pyc files into the image
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
 
-# Install dependencies
+# Install dependencies first so this layer is cached between code changes
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Copy application code only -- docs/ isn't needed at runtime
 COPY src ./src
-COPY docs ./docs
 
-# Expose the port Sanic runs on
+# Run as an unprivileged user
+RUN useradd --create-home --uid 1000 appuser
+USER appuser
+
+# Sanic listens on PORT (default 8000) and binds to 0.0.0.0 in src/app.py.
+# Azure's ingress target port is 8000 to match.
 EXPOSE 8000
 
-# Start the application 
-# (Ensure it binds to 0.0.0.0 so Azure can route traffic to it)
-CMD ["python", "-m", "src.app", "--host=0.0.0.0", "--port=8000"]
+CMD ["python", "-m", "src.app"]
