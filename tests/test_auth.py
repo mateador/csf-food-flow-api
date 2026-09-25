@@ -387,3 +387,45 @@ async def test_logout_without_a_session_still_succeeds(api):
 
     assert res.status == 200
     assert "Max-Age=0" in res.headers["set-cookie"]
+
+# --- Housekeeping -----------------------------------------------------------
+async def _insert_code(db, user_id, expired_hours_ago):
+    await db.execute(
+        """INSERT INTO login_codes (user_id, code_hash, created_at, expires_at, used_at)
+           VALUES ($1, 'x', now() - make_interval(hours => $2) - interval '10 minutes',
+                   now() - make_interval(hours => $2), now() - make_interval(hours => $2))""",
+        user_id,
+        expired_hours_ago,
+    )
+
+
+async def test_issuing_a_code_deletes_codes_expired_over_a_day_ago(api, db, make_user, sent_codes):
+    alex = await make_user("ADMIN", email="alex@example.org")
+    other = await make_user("ADMIN", email="other@example.org")
+    await _insert_code(db, alex["id"], 25)
+    await _insert_code(db, other["id"], 48)  # everyone's old rows go, not just the requester's
+
+    await api.post(REQUEST, json={"email": "alex@example.org"})
+
+    assert await db.fetchval("SELECT count(*) FROM login_codes") == 1  # just the new code
+
+
+async def test_codes_from_the_last_day_are_kept(api, db, make_user, sent_codes):
+    alex = await make_user("ADMIN", email="alex@example.org")
+    await _insert_code(db, alex["id"], 23)
+
+    await api.post(REQUEST, json={"email": "alex@example.org"})
+
+    assert await db.fetchval("SELECT count(*) FROM login_codes") == 2
+
+
+async def test_housekeeping_does_not_weaken_the_request_throttle(
+    api, make_user, sent_codes, fixed_codes
+):
+    fixed_codes(1111, 2222, 3333)
+    await make_user("ADMIN", email="alex@example.org")
+
+    for _ in range(4):
+        await api.post(REQUEST, json={"email": "alex@example.org"})
+
+    assert len(sent_codes) == 3

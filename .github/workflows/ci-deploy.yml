@@ -1,0 +1,175 @@
+# Test on every push and pull request; deploy to Azure Container Apps on
+# every push to main that passes.
+#
+# Deploying from here replaces the manual build/push/update from a laptop,
+# which is where this project's release mistakes happened (a lapsed
+# registry login, a reused tag). Here every image gets a unique tag, the
+# push must succeed before the app is updated, and the new revision must
+# answer its health check before the run is green.
+#
+# Migrations are NOT run here -- they stay a deliberate step from a laptop
+# (python -m src.db.migrate), run BEFORE merging code that needs them. See
+# "Deployment" in README.md.
+
+name: CI / Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: csfacrmateador.azurecr.io
+  IMAGE: csf-api
+  CONTAINER_APP: csf-api
+  RESOURCE_GROUP: csf-rg
+
+jobs:
+  test:
+    name: Tests (pytest against Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: csf_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/csf_test
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12" # same as the Dockerfile
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest
+
+      - name: Check the image builds
+        run: docker build -t "$IMAGE:ci" .
+
+  contract:
+    name: Contract matches the PWA's copy
+    # A warning, not a failure: when the contract changes, one repo is
+    # always updated before the other, and that must not block a deploy.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Compare docs/openapi.yaml with csf-food-flow-pwa (main)
+        run: |
+          curl --fail --silent --show-error --location \
+            https://raw.githubusercontent.com/mateador/csf-food-flow-pwa/main/docs/openapi.yaml \
+            --output /tmp/pwa-openapi.yaml
+          if diff -u /tmp/pwa-openapi.yaml docs/openapi.yaml; then
+            echo "Contract copies match."
+          else
+            echo "::warning::docs/openapi.yaml differs from the PWA's copy. Sync them (docs/CONTRACT.md)."
+          fi
+
+  deploy:
+    name: Deploy to Azure Container Apps
+    needs: test
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # One deploy at a time; a newer push waits for the running one to finish
+    # rather than cancelling it halfway through a revision rollout.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+
+    permissions:
+      contents: read
+      id-token: write # OIDC: sign in to Azure without a stored password
+
+    env:
+      # Azure CLI prints command output by default, and this repo's logs are
+      # public. Nothing is printed unless a step asks for it with --output.
+      AZURE_CORE_OUTPUT: none
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Sign in to Azure (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Choose the image tag
+        # Unique per commit and traceable back to it; never reused.
+        run: echo "TAG=git-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      - name: Build and push the image
+        run: |
+          az acr login --name "${REGISTRY%%.*}"
+          docker build -t "$REGISTRY/$IMAGE:$TAG" .
+          docker push "$REGISTRY/$IMAGE:$TAG"
+
+      - name: Record the image currently running (for rollback)
+        run: |
+          previous=$(az containerapp show --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" \
+            --query "properties.template.containers[0].image" --output tsv)
+          echo "PREVIOUS_IMAGE=$previous" >> "$GITHUB_ENV"
+          echo "Currently configured: $previous"
+
+      - name: Update the container app
+        run: |
+          az containerapp update --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" \
+            --image "$REGISTRY/$IMAGE:$TAG"
+
+      - name: Check the new revision answers
+        # Calls the new revision directly (not the app's main address, which
+        # keeps serving the previous revision until the new one is ready).
+        # Allows for a cold start: the app scales to zero when idle.
+        run: |
+          fqdn=$(az containerapp show --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" \
+            --query "properties.latestRevisionFqdn" --output tsv)
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error --max-time 10 "https://$fqdn/api/v1/health"; then
+              echo
+              echo "Revision is healthy (attempt $attempt)."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::The new revision did not answer /api/v1/health within 5 minutes."
+          echo "::error::The app keeps serving the previous revision until the new one is ready."
+          echo "::error::To roll back explicitly: az containerapp update --name $CONTAINER_APP --resource-group $RESOURCE_GROUP --image $PREVIOUS_IMAGE"
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy"
+            echo "- Image: \`$REGISTRY/$IMAGE:${TAG:-not built}\`"
+            echo "- Previously configured: \`${PREVIOUS_IMAGE:-unknown}\`"
+            echo "- Rollback: \`az containerapp update --name $CONTAINER_APP --resource-group $RESOURCE_GROUP --image ${PREVIOUS_IMAGE:-<previous image>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

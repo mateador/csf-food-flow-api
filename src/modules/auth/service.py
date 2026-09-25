@@ -23,6 +23,12 @@ MAX_CODE_ATTEMPTS = 5
 MAX_CODE_REQUESTS_PER_WINDOW = 3
 CODE_REQUEST_WINDOW_MINUTES = 10
 
+# How long a code row is kept after it expires. Nothing needs old rows: the
+# request throttle looks back CODE_REQUEST_WINDOW_MINUTES, and lockout only
+# concerns the one active code. A day is kept anyway so a "why didn't my
+# code work?" question can still be answered from the table the next day.
+LOGIN_CODE_RETENTION_HOURS = 24
+
 
 def _hash_code(email: str, code: str) -> str:
     # Salted with the email so the same 4-digit code for two different
@@ -68,6 +74,16 @@ async def create_login_code(user_id: str, email: str) -> str:
                 user_id,
                 code_hash,
                 expires_at,
+            )
+            # Housekeeping, for every user at once: without it the table
+            # grows by one row per sign-in forever. Done here rather than
+            # in a scheduled job because issuing a code is the only thing
+            # that adds rows, so the table can't grow without this running.
+            # One indexed delete (idx_login_codes_expires_at).
+            await conn.execute(
+                """DELETE FROM login_codes
+                   WHERE expires_at < now() - make_interval(hours => $1)""",
+                LOGIN_CODE_RETENTION_HOURS,
             )
     return raw_code
 

@@ -22,6 +22,8 @@ for other consumers in V1.
 ## Package Structure
 
 ```
+.github/workflows/
+  ci-deploy.yml           -- tests on every push/PR; deploys main to Azure
 Dockerfile                -- container image for Azure Container Apps
 .dockerignore             -- keeps .env and local files out of the image
 .env.example              -- every environment variable the app reads
@@ -138,6 +140,10 @@ limits rather than from the code itself:
 - **Request throttling**: at most 3 codes per user per 10 minutes, so the
   attempt budget can't be reset by requesting fresh codes.
 - **One active code per user**: issuing a new code invalidates the old one.
+- **Old codes are deleted**: whenever a code is issued, every code (for any
+  user) that expired more than 24 hours ago is removed, so the table
+  doesn't grow forever. The throttle only looks back 10 minutes, so this
+  never weakens it.
 - **No user enumeration**: the request endpoint returns the same response
   whether or not the email exists, is active, or is throttled.
 - Codes are stored hashed (SHA-256, salted with the email), never in
@@ -198,25 +204,47 @@ In production:
 - `SANIC_DEV` must be `false` or unset (turns on the `Secure` cookie flag)
 - `CORS_ORIGIN` must be the PWA's exact Netlify URL, never `*`
 
-**Releasing a new version.** Images are built and pushed from a local
-machine, then the container app is pointed at the new tag. Use a new tag
-for every release (`v2`, `v3`, …) so each revision maps to one image.
+**Releasing a new version.** Pushing to `main` releases automatically,
+through `.github/workflows/ci-deploy.yml`:
+
+1. The test suite runs against a Postgres service container, and the
+   image is built once as a check.
+2. If that passes, the image is built and pushed to the registry, tagged
+   `git-<first 7 characters of the commit>`, so every image is unique and
+   traceable to its commit.
+3. The container app is updated to that image, creating a new revision.
+4. The new revision's own address is polled on `/api/v1/health` for up to
+   five minutes. Until the new revision is ready, the app keeps serving
+   the previous one.
+
+The run's summary shows the image it deployed and the rollback command
+for the image that was running before. Pull requests run the tests only.
+The workflow signs in to Azure with OpenID Connect, so no Azure password
+is stored in GitHub. The three repository secrets are `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID` and `AZURE_SUBSCRIPTION_ID`.
+
+To redeploy without a new commit, run the workflow from the Actions tab
+("Run workflow" on `main`).
+
+**Rolling back:**
 
 ```bash
-docker build -t csfacrmateador.azurecr.io/csf-api:v2 .
-docker push csfacrmateador.azurecr.io/csf-api:v2
-
-az containerapp update \
-  --name csf-api \
-  --resource-group csf-rg \
-  --image csfacrmateador.azurecr.io/csf-api:v2
+az acr repository show-tags --name csfacrmateador --repository csf-api \
+  --orderby time_desc -o table
+az containerapp update --name csf-api --resource-group csf-rg \
+  --image csfacrmateador.azurecr.io/csf-api:<previous tag>
 ```
 
-The update creates a new revision of the container app running the new
-image.
+**Releasing by hand** is still possible if GitHub Actions is unavailable:
+`az acr login --name csfacrmateador`, then `docker build`, `docker push`
+and `az containerapp update` with a tag that has never been used. Only run
+the update after the push has succeeded.
 
-**Migrations** are not run by the container. Run them from a local machine
-against the same Neon database (the runner uses `DIRECT_URL`):
+**Migrations** are not run by the container or by the workflow. Run them
+from a local machine against the same Neon database (the runner uses
+`DIRECT_URL`), **before** pushing code that depends on them. Pushing to
+`main` deploys straight away, so code that expects a new column must not
+reach `main` until the migration has been applied:
 
 ```bash
 python -m src.db.migrate
@@ -246,7 +274,10 @@ session cookie first-party in Safari and private browsing.
   is still no "sign out everywhere" button separate from deactivation.
 - **A4** — Automated tests cover auth, entries, bulk sync, reports and
   admin endpoints against a real Postgres database (see "Running the
-  tests"). Tests run locally; there is no CI pipeline yet. Known bugs are
-  recorded as `xfail` tests rather than left undocumented.
+  tests"). They run on every push and pull request in GitHub Actions, and
+  a deploy only happens when they pass. Known bugs are recorded as `xfail`
+  tests rather than left undocumented.
 - **A5** — `docs/openapi.yaml` sync between this repo and the PWA repo is
-  a manual discipline (see `docs/CONTRACT.md`), not CI-enforced.
+  a manual discipline (see `docs/CONTRACT.md`). CI compares the two copies
+  on every run and warns when they differ, but doesn't block a deploy,
+  because one repo is always updated before the other.
