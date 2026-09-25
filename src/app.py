@@ -74,7 +74,29 @@ async def teardown_db(app):
 
 @app.get("/api/v1/health")
 async def health(request):
+    """Liveness: the process is up and answering. Deliberately touches
+    nothing else, so it stays cheap and never wakes the database."""
     return json_response({"status": "ok", "version": "0.1.0"})
+
+
+@app.get("/api/v1/health/ready")
+async def readiness(request):
+    """
+    Readiness: the API can actually serve users, which means it can reach
+    the database. Used by the uptime check and the deploy check -- a wrong
+    DATABASE_URL secret, a revoked role or a Neon outage leaves /health
+    saying "ok" while every sign-in fails, and this catches that.
+
+    Wakes Neon's compute if it has scaled to zero, so it's only called on
+    a schedule, never by the PWA.
+    """
+    try:
+        async with db_client.pool().acquire(timeout=10) as conn:
+            await conn.fetchval("SELECT 1", timeout=10)
+    except Exception:
+        logger.error("readiness_database_unreachable", exc_info=True)
+        return json_response({"status": "unavailable", "database": "unreachable"}, status=503)
+    return json_response({"status": "ok", "database": "ok"})
 
 
 if __name__ == "__main__":

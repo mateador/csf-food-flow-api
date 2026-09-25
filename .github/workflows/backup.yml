@@ -1,0 +1,108 @@
+# Nightly database backup to Azure Blob Storage (UK South), verified by a
+# test restore every night.
+#
+# Why this exists: Neon's Free plan can only restore to a point in the last
+# 6 hours. A mistake noticed the next morning -- a wrong bulk edit, a bad
+# migration -- would be unrecoverable without an independent copy.
+#
+# How it works:
+#   1. pg_dump with a READ-ONLY database role (BACKUP_DATABASE_URL), using
+#      the same Postgres major version as the server.
+#   2. Restore the dump into a throwaway Postgres container and check every
+#      table's row count against production (scripts/verify-backup.sh). A
+#      backup that can't be restored fails the run.
+#   3. Upload to a private blob container. Blobs are kept 90 days (storage
+#      lifecycle rule), and deleted blobs are recoverable for 7 days.
+#
+# The dump never goes to GitHub: no artifact, no log output. Backups stay in
+# the UK, in storage only you and this workflow's identity can read.
+#
+# A failed run emails you, like the uptime check.
+
+name: Nightly backup
+
+on:
+  schedule:
+    - cron: "30 2 * * *" # 02:30 UTC, when nobody is recording
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC sign-in to Azure for the upload
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Back up, verify, upload
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      AZURE_CORE_OUTPUT: none
+      DB_URL: ${{ secrets.BACKUP_DATABASE_URL }}
+      STORAGE_ACCOUNT: ${{ vars.BACKUP_STORAGE_ACCOUNT }}
+      CONTAINER: db-backups
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check configuration
+        run: |
+          if [ -z "$DB_URL" ]; then echo "::error::Secret BACKUP_DATABASE_URL is not set."; exit 1; fi
+          if [ -z "$STORAGE_ACCOUNT" ]; then echo "::error::Variable BACKUP_STORAGE_ACCOUNT is not set."; exit 1; fi
+
+      - name: Match the server's Postgres version
+        # pg_dump must be at least as new as the server, so use the same
+        # major version rather than whatever the runner ships with.
+        run: |
+          num=$(docker run --rm -e DB_URL postgres:17 sh -c 'psql "$DB_URL" -tAc "SHOW server_version_num"')
+          major=$((num / 10000))
+          echo "Server is Postgres $major."
+          echo "PG_IMAGE=postgres:$major" >> "$GITHUB_ENV"
+
+      - name: Dump the database
+        run: |
+          stamp=$(date -u +%Y-%m-%dT%H%MZ)
+          echo "BACKUP_FILE=csf-$stamp.dump" >> "$GITHUB_ENV"
+          docker run --rm -e DB_URL "$PG_IMAGE" \
+            sh -c 'pg_dump --format=custom --no-owner --no-privileges "$DB_URL"' > "csf-$stamp.dump"
+          echo "Dump size: $(du -h "csf-$stamp.dump" | cut -f1)"
+
+      - name: Restore it into a throwaway database and verify
+        run: |
+          docker run -d --name restore-check -e POSTGRES_PASSWORD=restore -p 5433:5432 "$PG_IMAGE" >/dev/null
+          for _ in $(seq 1 30); do
+            docker exec restore-check pg_isready -U postgres >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec -i restore-check \
+            pg_restore --username postgres --dbname postgres --no-owner --no-privileges --exit-on-error \
+            < "$BACKUP_FILE"
+          expected=$(find src/db/migrations -name '*.sql' | wc -l | tr -d ' ')
+          docker run --rm --network host -e DB_URL -v "$PWD:/work" -w /work "$PG_IMAGE" \
+            bash scripts/verify-backup.sh "$DB_URL" \
+            "postgresql://postgres:restore@localhost:5433/postgres" "$expected"
+
+      - name: Sign in to Azure (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Upload to Blob Storage
+        run: |
+          az storage blob upload --auth-mode login \
+            --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER" \
+            --name "$BACKUP_FILE" --file "$BACKUP_FILE"
+          echo "### Backup" >> "$GITHUB_STEP_SUMMARY"
+          echo "Uploaded and verified: \`$CONTAINER/$BACKUP_FILE\` in \`$STORAGE_ACCOUNT\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker rm -f restore-check >/dev/null 2>&1 || true
+          rm -f csf-*.dump

@@ -24,6 +24,10 @@ for other consumers in V1.
 ```
 .github/workflows/
   ci-deploy.yml           -- tests on every push/PR; deploys main to Azure
+  uptime.yml              -- checks the service in hub hours; emails on failure
+  backup.yml              -- nightly verified backup to Azure Blob Storage
+scripts/
+  verify-backup.sh        -- proves a restored backup matches production
 Dockerfile                -- container image for Azure Container Apps
 .dockerignore             -- keeps .env and local files out of the image
 .env.example              -- every environment variable the app reads
@@ -259,6 +263,71 @@ session cookie first-party in Safari and private browsing.
 **Database → Neon**: no separate deployment step. Point
 `DATABASE_URL`/`DIRECT_URL` at the Neon project.
 
+## Monitoring
+
+Two health endpoints:
+
+- `GET /api/v1/health` — **liveness**: the process is up. Touches nothing
+  else, so it stays cheap and never wakes the database.
+- `GET /api/v1/health/ready` — **readiness**: the API can reach the
+  database. It returns 503 if it can't. Used by the uptime check and the
+  deploy check. It wakes the database, so the PWA never calls it.
+
+`.github/workflows/uptime.yml` calls readiness every two hours in hub
+hours, Monday to Saturday, both directly and through the Netlify proxy
+(repository variable `PWA_URL`). A failed run emails whoever last edited
+its schedule. The interval is deliberate: each check can wake the
+scaled-to-zero app for about five minutes, and the free Azure allowance
+is about 100 hours awake a month at this app's size.
+
+## Backups and restore
+
+Neon's Free plan only restores to a point in the last 6 hours, so there's
+an independent nightly backup, `.github/workflows/backup.yml`:
+
+1. `pg_dump` runs with a **read-only** database role
+   (`BACKUP_DATABASE_URL`), on the same Postgres major version as the
+   server.
+2. The dump is **restored into a throwaway database, and every table's
+   row count is checked against production**
+   (`scripts/verify-backup.sh`). A backup that can't be restored fails
+   the run.
+3. It's uploaded to a private container, `db-backups`, in an Azure
+   Storage account in UK South (repository variable
+   `BACKUP_STORAGE_ACCOUNT`). Backups are kept 90 days, and deletions are
+   recoverable for 7 days.
+
+Backups never pass through GitHub: no artifacts, and nothing in the logs.
+
+**Restoring.** Practise this once, before it's needed.
+
+```bash
+SA=<storage account name>
+
+# 1. Find and download a backup (names sort by date)
+az storage blob list --account-name "$SA" --container-name db-backups \
+  --auth-mode key --query "[].name" -o tsv | sort | tail -5
+az storage blob download --account-name "$SA" --container-name db-backups \
+  --auth-mode key --name <backup name> --file restore.dump
+
+# 2. Inspect it in a throwaway local database first
+docker run -d --name csf-restore -e POSTGRES_PASSWORD=restore -p 5434:5432 postgres:<server major>
+docker exec -i csf-restore pg_restore -U postgres -d postgres --no-owner --no-privileges < restore.dump
+psql postgresql://postgres:restore@localhost:5434/postgres -c "SELECT count(*) FROM weigh_entries"
+```
+
+**To recover production:**
+1. In the Neon console, create a new, empty database on the main branch
+   (Databases → New database).
+2. Restore into it using its **direct** connection string:
+   `pg_restore --no-owner --no-privileges -d "<direct URL>" restore.dump`
+3. Point the app at the new database, then restart the revision so it
+   picks up the changed secret:
+   `az containerapp secret set --name csf-api --resource-group csf-rg --secrets database-url="<pooled URL>"`
+   `az containerapp revision restart --name csf-api --resource-group csf-rg --revision <latest revision>`
+4. Update `DIRECT_URL` in your local `.env` and `BACKUP_DATABASE_URL` in
+   GitHub to the new database.
+   
 ## Known Assumptions / TODOs
 
 - **A1** — CSV export uses a flat placeholder layout. It is pending

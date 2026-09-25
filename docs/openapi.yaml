@@ -245,6 +245,36 @@ paths:
                   status: { type: string, enum: [ok] }
                   version: { type: string }
 
+  /health/ready:
+    get:
+      operationId: getReadiness
+      summary: Confirm the API can serve users (reaches the database)
+      description: >
+        For uptime monitoring and deploy checks only -- it wakes the database
+        if it has scaled to zero, so clients should not call it.
+      security: []
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, database]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  database: { type: string, enum: [ok] }
+        "503":
+          description: The database can't be reached
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, database]
+                properties:
+                  status: { type: string, enum: [unavailable] }
+                  database: { type: string, enum: [unreachable] }
+
   /auth/code/request:
     post:
       operationId: requestLoginCode

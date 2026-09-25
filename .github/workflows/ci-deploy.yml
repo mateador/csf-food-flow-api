@@ -147,19 +147,21 @@ jobs:
       - name: Check the new revision answers
         # Calls the new revision directly (not the app's main address, which
         # keeps serving the previous revision until the new one is ready).
+        # Uses the readiness check, so a revision that starts but can't reach
+        # the database (e.g. a wrong DATABASE_URL secret) fails the deploy.
         # Allows for a cold start: the app scales to zero when idle.
         run: |
           fqdn=$(az containerapp show --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" \
             --query "properties.latestRevisionFqdn" --output tsv)
           for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error --max-time 10 "https://$fqdn/api/v1/health"; then
+            if curl --fail --silent --show-error --max-time 10 "https://$fqdn/api/v1/health/ready""; then
               echo
               echo "Revision is healthy (attempt $attempt)."
               exit 0
             fi
             sleep 10
           done
-          echo "::error::The new revision did not answer /api/v1/health within 5 minutes."
+          echo "::error::The new revision did not report ready (/api/v1/health/ready) within 5 minutes."
           echo "::error::The app keeps serving the previous revision until the new one is ready."
           echo "::error::To roll back explicitly: az containerapp update --name $CONTAINER_APP --resource-group $RESOURCE_GROUP --image $PREVIOUS_IMAGE"
           exit 1

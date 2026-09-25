@@ -1,0 +1,66 @@
+# Checks the service is up during hub hours, and emails you when it isn't.
+#
+# GitHub emails the person who last edited this file's `cron` line when a
+# scheduled run fails (with the default notification settings), so a red
+# run here IS the alert.
+#
+# Why not every five minutes: the API scales to zero when idle, and every
+# check wakes it for about five minutes (the scale-down cooldown). Azure's
+# free monthly allowance is 180,000 vCPU-seconds and 360,000 GiB-seconds;
+# at this app's 0.5 vCPU / 1 GiB that's about 100 hours awake a month, for
+# real use and checks combined. Every two hours in hub hours, Monday to
+# Saturday, costs at most ~16 of those hours -- and far less when the app
+# is already awake because volunteers are using it.
+#
+# Times are UTC: 07:15-17:15 UTC is 08:15-18:15 in summer (BST) and
+# 07:15-17:15 in winter. Adjust to the hubs' real opening hours.
+
+name: Uptime check
+
+on:
+  schedule:
+    - cron: "15 7-17/2 * * 1-6"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  API_URL: https://csf-api.bravebush-24fde88f.uksouth.azurecontainerapps.io
+
+jobs:
+  check:
+    name: Service is up
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: API is up and can reach the database
+        # Retries for up to ~3 minutes: a check that lands while the app is
+        # scaled to zero waits for a cold start (and Neon may be waking too).
+        run: |
+          for attempt in $(seq 1 18); do
+            if curl --fail --silent --show-error --max-time 10 "$API_URL/api/v1/health/ready"; then
+              echo
+              echo "API ready (attempt $attempt)."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::The API did not report ready within 3 minutes: $API_URL/api/v1/health/ready"
+          echo "::error::Check: az containerapp logs show --name csf-api --resource-group csf-rg --type system --tail 50"
+          exit 1
+
+      - name: PWA loads, and reaches the API through Netlify
+        # Set the repository variable PWA_URL (Settings -> Secrets and
+        # variables -> Actions -> Variables) to the Netlify site address,
+        # e.g. https://your-site.netlify.app -- no trailing slash.
+        if: vars.PWA_URL != ''
+        env:
+          PWA_URL: ${{ vars.PWA_URL }}
+        run: |
+          curl --fail --silent --show-error --max-time 20 --output /dev/null "$PWA_URL/"
+          echo "PWA loads."
+          curl --fail --silent --show-error --max-time 30 "$PWA_URL/api/v1/health/ready"
+          echo
+          echo "API reachable through the Netlify proxy."
