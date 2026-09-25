@@ -356,3 +356,34 @@ async def test_session_for_a_user_that_does_not_exist_is_rejected(api):
     res = await api.get("/api/v1/users/", user=ghost)
 
     assert res.status == 401
+
+# --- Sign-out -------------------------------------------------------------
+LOGOUT = "/api/v1/auth/logout"
+
+
+async def test_logout_expires_the_session_cookie(api, world):
+    res = await api.post(LOGOUT, user=world["hub_user"])
+
+    assert res.status == 200
+    assert res.json == {"status": "signed_out"}
+    cookie = res.headers["set-cookie"]
+    assert cookie.startswith(f"{SESSION_COOKIE_NAME}=")
+    assert "Max-Age=0" in cookie
+    assert "Path=/" in cookie
+    assert "HttpOnly" in cookie
+    assert "SameSite=Lax" in cookie
+
+
+async def test_logout_cookie_is_secure_in_production(api, monkeypatch):
+    monkeypatch.setattr(auth_routes, "IS_PRODUCTION", True)
+
+    res = await api.post(LOGOUT)
+
+    assert "Secure" in res.headers["set-cookie"]
+
+
+async def test_logout_without_a_session_still_succeeds(api):
+    res = await api.post(LOGOUT)
+
+    assert res.status == 200
+    assert "Max-Age=0" in res.headers["set-cookie"]

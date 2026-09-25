@@ -147,6 +147,10 @@ On success the API sets an httpOnly, `SameSite=Lax` session cookie (a JWT,
 `Secure` in production) valid for `ACCESS_TOKEN_TTL_MINUTES` (default 12
 hours).
 
+Signing out is `POST /auth/logout`, which expires the cookie on that
+device. The browser can't delete an httpOnly cookie itself, so without
+this call a shared device would stay signed in as the previous person.
+
 ## Database Migration and Seed Instructions
 
 See `src/db/README.md` for full detail. Short version:

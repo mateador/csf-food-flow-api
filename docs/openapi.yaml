@@ -314,6 +314,27 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
 
+  /auth/logout:
+    post:
+      operationId: logout
+      summary: End the session on this device
+      description: >
+        Expires the httpOnly session cookie (Set-Cookie with Max-Age=0). The
+        browser cannot remove an httpOnly cookie itself, so clients must call
+        this to sign out -- essential on shared devices. Always succeeds,
+        including when there is no session.
+      security: []
+      responses:
+        "200":
+          description: Session cookie expired
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [signed_out] }
+
   /me:
     get:
       operationId: getMe

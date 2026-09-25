@@ -102,3 +102,29 @@ async def verify_login_code(request):
         max_age=int(os.environ.get("ACCESS_TOKEN_TTL_MINUTES", "720")) * 60,
     )
     return response
+
+@auth_bp.post("/logout")
+async def logout(request):
+    """
+    Ends the session on THIS device by expiring the httpOnly cookie. The
+    browser can't remove an httpOnly cookie itself, so without this call
+    "Sign out" in the PWA would only forget the user locally while the
+    cookie stayed valid -- and on a shared hub tablet, the next volunteer
+    would be recording as the previous one.
+
+    No auth required and always succeeds: signing out when already signed
+    out is not an error. The attributes must match the ones the cookie was
+    set with, or the browser treats it as a different cookie and keeps the
+    original.
+    """
+    response = json_response({"status": "signed_out"})
+    response.cookies.add_cookie(
+        SESSION_COOKIE_NAME,
+        "",
+        path="/",
+        httponly=True,
+        secure=IS_PRODUCTION,
+        samesite="Lax",
+        max_age=0,
+    )
+    return response
