@@ -154,7 +154,7 @@ jobs:
           fqdn=$(az containerapp show --name "$CONTAINER_APP" --resource-group "$RESOURCE_GROUP" \
             --query "properties.latestRevisionFqdn" --output tsv)
           for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error --max-time 10 "https://$fqdn/api/v1/health/ready""; then
+            if curl --fail --silent --show-error --max-time 10 "https://$fqdn/api/v1/health/ready"; then
               echo
               echo "Revision is healthy (attempt $attempt)."
               exit 0
