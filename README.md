@@ -327,7 +327,7 @@ psql postgresql://postgres:restore@localhost:5434/postgres -c "SELECT count(*) F
    `az containerapp revision restart --name csf-api --resource-group csf-rg --revision <latest revision>`
 4. Update `DIRECT_URL` in your local `.env` and `BACKUP_DATABASE_URL` in
    GitHub to the new database.
-   
+
 ## Known Assumptions / TODOs
 
 - **A1** — CSV export uses a flat placeholder layout. It is pending
