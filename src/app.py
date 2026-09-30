@@ -47,6 +47,7 @@ from src.modules.auth.routes import auth_bp
 from src.modules.auth.me_routes import me_bp
 from src.modules.entries.routes import entries_bp
 from src.modules.locations.routes import locations_bp
+from src.modules.source_locations.routes import source_locations_bp
 from src.modules.categories.routes import categories_bp
 from src.modules.reports.routes import reports_bp
 from src.modules.users.routes import users_bp
@@ -56,6 +57,7 @@ app.blueprint(auth_bp, url_prefix="/api/v1/auth")
 app.blueprint(me_bp, url_prefix="/api/v1")
 app.blueprint(entries_bp, url_prefix="/api/v1/entries")
 app.blueprint(locations_bp, url_prefix="/api/v1/locations")
+app.blueprint(source_locations_bp, url_prefix="/api/v1/source-locations")
 app.blueprint(categories_bp, url_prefix="/api/v1/categories")
 app.blueprint(reports_bp, url_prefix="/api/v1/reports")
 app.blueprint(users_bp, url_prefix="/api/v1/users")

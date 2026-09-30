@@ -31,6 +31,21 @@ LOCATIONS = [
     ("Example Hub", "HUB"),
 ]
 
+# Mirrors the INSERT already baked into migration 0007_add_source_locations
+# -- kept here too, in sync by hand, same convention as CATEGORIES above.
+SOURCE_LOCATIONS = [
+    "Maison Clement",
+    "Co-op",
+    "Aldi",
+    "Lidl",
+    "Salvation Army",
+    "Tesco",
+    "Waitrose",
+    "Mayfield Produce",
+    "Sainsbury",
+    "Fareshare (free)",
+]
+
 # The initial admin account. No password -- auth is an emailed login code,
 # so this user signs in the same way anyone else does: request a code at
 # /login, no separate bootstrap credential needed. Set SEED_ADMIN_EMAIL to
@@ -70,6 +85,15 @@ async def run():
                     loc_type,
                 )
                 location_ids[loc_type] = row["id"]
+
+            print("Seeding source locations...")
+            for name in SOURCE_LOCATIONS:
+                await conn.execute(
+                    """INSERT INTO source_locations (name)
+                       VALUES ($1)
+                       ON CONFLICT (name) DO NOTHING""",
+                    name,
+                )
 
             print("Seeding admin user...")
             await conn.execute(

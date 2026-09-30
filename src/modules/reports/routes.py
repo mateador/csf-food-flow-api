@@ -39,13 +39,14 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
 
     async with pool().acquire() as conn:
         rows = await conn.fetch(
-            f"""SELECT location_id, destination_location_id, entry_type,
+            f"""SELECT location_id, destination_location_id, source_location_id, entry_type,
                        food_category_code, net_weight_kg
                 FROM weigh_entries
                 WHERE {' AND '.join(conditions)}""",
             *params,
         )
         location_rows = await conn.fetch("SELECT id, name FROM locations")
+        source_location_rows = await conn.fetch("SELECT id, name FROM source_locations")
         # food_categories is the single source of truth for which codes
         # exist, so the report follows it as categories are added or
         # retired. Active categories always appear (as 0 if unused), so the
@@ -64,10 +65,12 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
             category_codes.append(code)
 
     location_names = {str(r["id"]): r["name"] for r in location_rows}
+    source_location_names = {str(r["id"]): r["name"] for r in source_location_rows}
 
     totals_in = _empty_category_totals(category_codes)
     totals_out = _empty_category_totals(category_codes)
     by_location: dict[str, dict] = {}
+    by_source_location: dict[str | None, dict] = {}
 
     def ensure_location(loc_id: str) -> dict:
         if loc_id not in by_location:
@@ -79,6 +82,22 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
             }
         return by_location[loc_id]
 
+    def ensure_source_location(source_id: str | None) -> dict:
+        # source_id is None for entries recorded before this field existed
+        # (source_location_id is nullable in the DB for exactly that reason
+        # -- see migration 0007). Those group under one "Unassigned" bucket
+        # rather than being dropped from the report.
+        if source_id not in by_source_location:
+            by_source_location[source_id] = {
+                "source_location_id": source_id,
+                "source_location_name": source_location_names.get(source_id, "Unassigned")
+                if source_id
+                else "Unassigned",
+                "in_by_category": _empty_category_totals(category_codes),
+                "out_by_category": _empty_category_totals(category_codes),
+            }
+        return by_source_location[source_id]
+
     for row in rows:
         # Net weight -- the actual food weight, with tray/container weight
         # already subtracted -- is the meaningful reporting figure. Gross
@@ -86,12 +105,15 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
         # whatever trays carried it.
         weight = row["net_weight_kg"]
         code = row["food_category_code"]
+        source_id = str(row["source_location_id"]) if row["source_location_id"] else None
         if row["entry_type"] == "IN":
             totals_in[code] += weight
             ensure_location(str(row["location_id"]))["in_by_category"][code] += weight
+            ensure_source_location(source_id)["in_by_category"][code] += weight
         else:  # OUT
             totals_out[code] += weight
             ensure_location(str(row["location_id"]))["out_by_category"][code] += weight
+            ensure_source_location(source_id)["out_by_category"][code] += weight
 
     return {
         "week_start": week_start.isoformat(),
@@ -104,6 +126,14 @@ async def _compute_weekly_totals(week_start: date, location_filter: str | None):
                 "out_by_category": _as_kg(loc["out_by_category"]),
             }
             for loc in by_location.values()
+        ],
+        "by_source_location": [
+            {
+                **loc,
+                "in_by_category": _as_kg(loc["in_by_category"]),
+                "out_by_category": _as_kg(loc["out_by_category"]),
+            }
+            for loc in by_source_location.values()
         ],
     }
 
@@ -148,8 +178,8 @@ async def weekly_report(request):
 async def weekly_export_csv(request):
     """
     V1 restricted to ADMIN per spec. Column layout is a FLAT placeholder
-    (date, location, entry_type, name, category, gross weight, trays, net
-    weight) -- PENDING validation against the real CSF spreadsheet
+    (date, location, from, entry_type, name, category, gross weight, trays,
+    net weight) -- PENDING validation against the real CSF spreadsheet
     template. See docs/CONTRACT.md and the root README's "Known
     assumptions" section.
     """
@@ -173,11 +203,13 @@ async def weekly_export_csv(request):
 
     async with pool().acquire() as conn:
         rows = await conn.fetch(
-            f"""SELECT we.id, we.collection_date, l.name AS location_name, we.entry_type,
+            f"""SELECT we.id, we.collection_date, l.name AS location_name,
+                       sl.name AS source_location_name, we.entry_type,
                        we.name AS item_name, we.food_category_code,
                        we.gross_weight_kg, we.net_weight_kg
                 FROM weigh_entries we
                 JOIN locations l ON l.id = we.location_id
+                LEFT JOIN source_locations sl ON sl.id = we.source_location_id
                 WHERE {' AND '.join(conditions)}
                 ORDER BY we.collection_date, l.name""",
             *params,
@@ -200,13 +232,15 @@ async def weekly_export_csv(request):
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
-        ["Date", "Location", "Type", "Name", "Category", "Gross Weight (kg)", "Trays", "Net Weight (kg)"]
+        ["Date", "Location", "From", "Type", "Name", "Category", "Gross Weight (kg)", "Trays",
+         "Net Weight (kg)"]
     )  # PLACEHOLDER layout
     for row in rows:
         writer.writerow(
             [
                 row["collection_date"].isoformat(),
                 row["location_name"],
+                row["source_location_name"] or "",
                 row["entry_type"],
                 row["item_name"],
                 row["food_category_code"],

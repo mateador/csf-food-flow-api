@@ -56,9 +56,16 @@ from src.modules.auth.service import issue_session_jwt  # noqa: E402
 # A Monday, so it's a valid week_start for reports.
 MONDAY = date(2026, 9, 21)
 
+# entry_payload()'s default source_location_id -- one of the rows migration
+# 0007 seeds -- looked up once the schema exists rather than hardcoded,
+# since its id is a fresh gen_random_uuid() every time the schema is rebuilt.
+_DEFAULT_SOURCE_LOCATION_NAME = "Tesco"
+_default_source_location_id: str | None = None
+
 
 # --- Schema: built once per test run ---------------------------------------
 async def _rebuild_schema():
+    global _default_source_location_id
     conn = await asyncpg.connect(TEST_DATABASE_URL)
     try:
         await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
@@ -73,6 +80,10 @@ async def _rebuild_schema():
                 code,
                 name,
             )
+        row = await conn.fetchrow(
+            "SELECT id FROM source_locations WHERE name = $1", _DEFAULT_SOURCE_LOCATION_NAME
+        )
+        _default_source_location_id = str(row["id"])
     finally:
         await conn.close()
 
@@ -147,6 +158,21 @@ def make_location(db):
 
 
 @pytest.fixture
+def make_source_location(db):
+    async def _make(name, active=True):
+        row = await db.fetchrow(
+            """INSERT INTO source_locations (name, active) VALUES ($1, $2)
+               ON CONFLICT (name) DO UPDATE SET active = EXCLUDED.active
+               RETURNING id""",
+            name,
+            active,
+        )
+        return str(row["id"])
+
+    return _make
+
+
+@pytest.fixture
 def make_user(db):
     async def _make(role, location_id=None, email=None, name=None, active=True):
         email = email or f"{role.lower()}-{os.urandom(3).hex()}@example.org"
@@ -187,6 +213,7 @@ def entry_payload(location_id, **overrides):
         "entry_type": "IN",
         "location_id": location_id,
         "destination_location_id": None,
+        "source_location_id": _default_source_location_id,
         "name": "Tesco Newmarket Road",
         "food_category_code": "FRESH",
         "gross_weight_kg": 10.0,

@@ -18,6 +18,7 @@ def _serialize_entry(row, trays: list | None = None) -> dict:
         "destination_location_id": str(row["destination_location_id"])
         if row["destination_location_id"]
         else None,
+        "source_location_id": str(row["source_location_id"]) if row["source_location_id"] else None,
         "name": row["name"],
         "food_category_code": row["food_category_code"],
         "gross_weight_kg": float(row["gross_weight_kg"]),
@@ -121,6 +122,7 @@ async def create_entry(request):
     entry_type = body.get("entry_type")
     location_id = body.get("location_id")
     destination_location_id = body.get("destination_location_id")
+    source_location_id = body.get("source_location_id")
     name = body.get("name")
     food_category_code = body.get("food_category_code")
     gross_weight_kg = body.get("gross_weight_kg")
@@ -129,7 +131,10 @@ async def create_entry(request):
     client_uuid = body.get("client_uuid")
     trays_input = body.get("trays", [])
 
-    if not all([entry_type, location_id, name, food_category_code, gross_weight_kg, collection_date]):
+    if not all(
+        [entry_type, location_id, source_location_id, name, food_category_code, gross_weight_kg,
+         collection_date]
+    ):
         return json_response(
             {"error": {"code": "VALIDATION_ERROR", "message": "Missing required field"}},
             status=422,
@@ -212,14 +217,15 @@ async def create_entry(request):
                 row = await conn.fetchrow(
                     """INSERT INTO weigh_entries
                        (client_uuid, entry_type, location_id, destination_location_id,
-                        name, food_category_code, gross_weight_kg, net_weight_kg,
-                        collection_date, notes, created_by)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                        source_location_id, name, food_category_code, gross_weight_kg,
+                        net_weight_kg, collection_date, notes, created_by)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                        RETURNING *""",
                     client_uuid,
                     entry_type,
                     location_id,
                     destination_location_id,
+                    source_location_id,
                     name,
                     food_category_code,
                     gross_weight_kg,
@@ -281,6 +287,9 @@ async def list_entries(request):
 
     if args.get("food_category_code"):
         conditions.append(f"food_category_code = {add_param(args.get('food_category_code'))}")
+
+    if args.get("source_location_id"):
+        conditions.append(f"source_location_id = {add_param(args.get('source_location_id'))}")
 
     if args.get("week_start"):
         from datetime import timedelta
@@ -365,6 +374,22 @@ async def bulk_sync_entries(request):
                 )
                 continue
 
+            # source_location_id is nullable in the DB (it doesn't exist on
+            # entries recorded before this field existed) but required for
+            # every new entry going forward -- checked explicitly here since
+            # a missing value would otherwise be accepted silently instead
+            # of failing the DB's NOT NULL check the way other required
+            # fields do.
+            if not item.get("source_location_id"):
+                results.append(
+                    {
+                        "client_uuid": client_uuid,
+                        "status": "error",
+                        "message": "source_location_id is required",
+                    }
+                )
+                continue
+
             try:
                 validated_trays, total_tray_weight = await _validate_and_price_trays(
                     conn, item.get("trays", [])
@@ -391,14 +416,15 @@ async def bulk_sync_entries(request):
                     row = await conn.fetchrow(
                         """INSERT INTO weigh_entries
                            (client_uuid, entry_type, location_id, destination_location_id,
-                            name, food_category_code, gross_weight_kg, net_weight_kg,
-                            collection_date, notes, created_by)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                            source_location_id, name, food_category_code, gross_weight_kg,
+                            net_weight_kg, collection_date, notes, created_by)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                            RETURNING id""",
                         client_uuid,
                         item.get("entry_type"),
                         item.get("location_id"),
                         item.get("destination_location_id"),
+                        item.get("source_location_id"),
                         item.get("name"),
                         item.get("food_category_code"),
                         gross_weight_kg,

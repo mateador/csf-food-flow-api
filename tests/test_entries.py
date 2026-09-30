@@ -106,8 +106,8 @@ async def test_retired_tray_type_is_rejected(api, db, world):
 
 # --- Creating an entry: validation -----------------------------------------
 @pytest.mark.parametrize(
-    "missing", ["entry_type", "location_id", "name", "food_category_code", "gross_weight_kg",
-                "collection_date"]
+    "missing", ["entry_type", "location_id", "source_location_id", "name", "food_category_code",
+                "gross_weight_kg", "collection_date"]
 )
 async def test_required_fields(api, world, missing):
     payload = entry_payload(world["hub"])
@@ -222,6 +222,19 @@ async def test_hub_user_only_sees_their_own_hub(api, world):
     assert [e["name"] for e in res.json["entries"]] == ["North collection"]
 
 
+async def test_entries_can_be_filtered_by_source_location(api, world, make_source_location):
+    aldi = await make_source_location("Aldi")
+    await api.post(
+        ENTRIES, user=world["centre_user"],
+        json=entry_payload(world["hub"], name="From Aldi", source_location_id=aldi),
+    )
+    await api.post(ENTRIES, user=world["centre_user"], json=entry_payload(world["other_hub"]))
+
+    res = await api.get(ENTRIES, user=world["centre_user"], params={"source_location_id": aldi})
+
+    assert [e["name"] for e in res.json["entries"]] == ["From Aldi"]
+
+
 async def test_food_centre_can_filter_by_location(api, world):
     await _seed_entries(api, world)
 
@@ -325,6 +338,18 @@ async def test_one_bad_entry_does_not_block_the_rest(api, db, world):
 
     assert [r["status"] for r in res.json["results"]] == ["error", "created"]
     assert await _count_entries(db) == 1
+
+
+async def test_bulk_requires_source_location(api, db, world):
+    """source_location_id is nullable in the DB (historical entries predate
+    it), so a missing value wouldn't trip the usual NOT NULL backstop --
+    it must be checked explicitly."""
+    missing_source = _queued(world, source_location_id=None)
+
+    res = await api.post(BULK, user=world["hub_user"], json={"entries": [missing_source]})
+
+    assert res.json["results"][0]["status"] == "error"
+    assert await _count_entries(db) == 0
 
 
 async def test_bulk_applies_hub_role_rules(api, db, world):

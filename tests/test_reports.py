@@ -78,6 +78,37 @@ async def test_in_and_out_are_totalled_separately_per_location(api, world):
     assert by_location["CSF Food Centre"]["out_by_category"]["FROZEN"] == 7.0
 
 
+async def test_in_and_out_are_totalled_separately_per_source_location(
+    api, world, make_source_location
+):
+    aldi = await make_source_location("Aldi")
+    await _record(api, world["hub_user"], world["hub"], food_category_code="BAKERY",
+                  gross_weight_kg=3.0, source_location_id=aldi)
+    await _record(api, world["centre_user"], world["centre"], entry_type="OUT",
+                  destination_location_id=world["other_hub"], food_category_code="FROZEN",
+                  gross_weight_kg=7.0)  # default source: Tesco, see conftest.entry_payload
+
+    res = await api.get(WEEKLY, user=world["admin"], params={"week_start": MONDAY.isoformat()})
+
+    by_source = {loc["source_location_name"]: loc for loc in res.json["by_source_location"]}
+    assert by_source["Aldi"]["in_by_category"]["BAKERY"] == 3.0
+    assert by_source["Tesco"]["out_by_category"]["FROZEN"] == 7.0
+
+
+async def test_entries_without_a_source_location_group_under_unassigned(api, db, world):
+    """source_location_id is nullable in the DB for entries recorded before
+    this field existed -- the report must still account for their weight
+    rather than silently dropping it."""
+    await _record(api, world["hub_user"], world["hub"], gross_weight_kg=4.0)
+    await db.execute("UPDATE weigh_entries SET source_location_id = NULL")
+
+    res = await api.get(WEEKLY, user=world["admin"], params={"week_start": MONDAY.isoformat()})
+
+    by_source = {loc["source_location_name"]: loc for loc in res.json["by_source_location"]}
+    assert by_source["Unassigned"]["source_location_id"] is None
+    assert by_source["Unassigned"]["in_by_category"]["FRESH"] == 4.0
+
+
 async def test_voided_and_out_of_week_entries_are_excluded(api, db, world):
     await _record(api, world["hub_user"], world["hub"], name="counted", gross_weight_kg=5.0)
     await _record(api, world["hub_user"], world["hub"], name="voided", gross_weight_kg=50.0)
@@ -175,8 +206,8 @@ async def test_csv_export_rows(api, world):
     assert 'filename="csf-report-2026-09-21.csv"' in res.headers["content-disposition"]
     rows = list(csv.reader(io.StringIO(res.text)))
     assert rows == [
-        ["Date", "Location", "Type", "Name", "Category", "Gross Weight (kg)", "Trays",
+        ["Date", "Location", "From", "Type", "Name", "Category", "Gross Weight (kg)", "Trays",
          "Net Weight (kg)"],
-        ["2026-09-21", "North Hub", "IN", "Tesco Newmarket Road", "FRESH", "10.0",
+        ["2026-09-21", "North Hub", "Tesco", "IN", "Tesco Newmarket Road", "FRESH", "10.0",
          "2x Medium", "6.8"],
     ]

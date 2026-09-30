@@ -105,6 +105,19 @@ components:
         type: { $ref: "#/components/schemas/LocationType" }
         active: { type: boolean }
 
+    SourceLocation:
+      type: object
+      description: >
+        Where food came from before being delivered to a hub or food
+        centre (a shop, donor, or "From" on Food In / Food Out) -- distinct
+        from Location, which is the hub/food-centre the entry is recorded
+        at.
+      required: [id, name, active]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        active: { type: boolean }
+
     FoodCategory:
       type: object
       required: [code, name, active]
@@ -119,6 +132,7 @@ components:
         - id
         - entry_type
         - location_id
+        - source_location_id
         - name
         - food_category_code
         - gross_weight_kg
@@ -135,6 +149,13 @@ components:
         entry_type: { $ref: "#/components/schemas/EntryType" }
         location_id: { type: string, format: uuid }
         destination_location_id: { type: [string, "null"], format: uuid }
+        source_location_id:
+          type: [string, "null"]
+          format: uuid
+          description: >
+            Where the food came from ("From"). Required on every entry
+            created going forward; null only on entries recorded before
+            this field existed.
         name: { type: string, description: "Name/description of the item being weighed" }
         food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
         gross_weight_kg:
@@ -189,7 +210,7 @@ components:
 
     WeeklyReport:
       type: object
-      required: [week_start, week_end, totals, by_location]
+      required: [week_start, week_end, totals, by_location, by_source_location]
       properties:
         week_start: { type: string, format: date }
         week_end: { type: string, format: date }
@@ -207,6 +228,21 @@ components:
             properties:
               location_id: { type: string, format: uuid }
               location_name: { type: string }
+              in_by_category: { $ref: "#/components/schemas/CategoryTotals" }
+              out_by_category: { $ref: "#/components/schemas/CategoryTotals" }
+        by_source_location:
+          type: array
+          description: >
+            Same shape as by_location, grouped by "From" instead. Entries
+            recorded before source_location_id existed group under one
+            entry with source_location_id null and source_location_name
+            "Unassigned".
+          items:
+            type: object
+            required: [source_location_id, source_location_name, in_by_category, out_by_category]
+            properties:
+              source_location_id: { type: [string, "null"], format: uuid }
+              source_location_name: { type: string }
               in_by_category: { $ref: "#/components/schemas/CategoryTotals" }
               out_by_category: { $ref: "#/components/schemas/CategoryTotals" }
 
@@ -486,6 +522,80 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { description: Not found }
 
+  /source-locations:
+    get:
+      operationId: listSourceLocations
+      summary: List source locations ("From") for form dropdowns
+      description: >
+        Unlike /locations, not restricted by role -- every authenticated
+        user sees the full list. ADMIN may include inactive rows via
+        `active=false`.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: active
+          in: query
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SourceLocation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: createSourceLocation
+      summary: Add a new source location
+      security: [{ cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceLocation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /source-locations/{id}:
+    patch:
+      operationId: updateSourceLocation
+      summary: Update a source location's name or active status
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                active: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceLocation" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Not found }
+
   /entries:
     get:
       operationId: listEntries
@@ -509,6 +619,9 @@ paths:
           in: query
           schema: { type: string, format: uuid }
         - name: destination_location_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: source_location_id
           in: query
           schema: { type: string, format: uuid }
         - name: entry_type
@@ -559,6 +672,7 @@ paths:
                 - client_uuid
                 - entry_type
                 - location_id
+                - source_location_id
                 - name
                 - food_category_code
                 - gross_weight_kg
@@ -568,6 +682,10 @@ paths:
                 entry_type: { $ref: "#/components/schemas/EntryType" }
                 location_id: { type: string, format: uuid }
                 destination_location_id: { type: [string, "null"], format: uuid }
+                source_location_id:
+                  type: string
+                  format: uuid
+                  description: Where the food came from ("From"). Required on every new entry.
                 name: { type: string, description: "Name/description of the item being weighed" }
                 food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
                 gross_weight_kg:
@@ -629,6 +747,7 @@ paths:
                       - client_uuid
                       - entry_type
                       - location_id
+                      - source_location_id
                       - name
                       - food_category_code
                       - gross_weight_kg
@@ -638,6 +757,7 @@ paths:
                       entry_type: { $ref: "#/components/schemas/EntryType" }
                       location_id: { type: string, format: uuid }
                       destination_location_id: { type: [string, "null"], format: uuid }
+                      source_location_id: { type: string, format: uuid }
                       name: { type: string, description: "Name/description of the item being weighed" }
                       food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
                       gross_weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
