@@ -31,8 +31,9 @@ LOCATIONS = [
     ("Example Hub", "HUB"),
 ]
 
-# Mirrors the INSERT already baked into migration 0007_add_source_locations
-# -- kept here too, in sync by hand, same convention as CATEGORIES above.
+# Mirrors the INSERTs already baked into migrations 0007_add_source_locations
+# and 0008_add_other_source_location -- kept here too, in sync by hand, same
+# convention as CATEGORIES above.
 SOURCE_LOCATIONS = [
     "Maison Clement",
     "Co-op",
@@ -44,6 +45,7 @@ SOURCE_LOCATIONS = [
     "Mayfield Produce",
     "Sainsbury",
     "Fareshare (free)",
+    "Other",
 ]
 
 # The initial admin account. No password -- auth is an emailed login code,
