@@ -86,13 +86,13 @@ async def test_in_and_out_are_totalled_separately_per_source_location(
                   gross_weight_kg=3.0, source_location_id=aldi)
     await _record(api, world["centre_user"], world["centre"], entry_type="OUT",
                   destination_location_id=world["other_hub"], food_category_code="FROZEN",
-                  gross_weight_kg=7.0)  # default source: Tesco, see conftest.entry_payload
+                  gross_weight_kg=7.0)  # OUT never has a source, so it groups under Unassigned
 
     res = await api.get(WEEKLY, user=world["admin"], params={"week_start": MONDAY.isoformat()})
 
     by_source = {loc["source_location_name"]: loc for loc in res.json["by_source_location"]}
     assert by_source["Aldi"]["in_by_category"]["BAKERY"] == 3.0
-    assert by_source["Tesco"]["out_by_category"]["FROZEN"] == 7.0
+    assert by_source["Unassigned"]["out_by_category"]["FROZEN"] == 7.0
 
 
 async def test_entries_without_a_source_location_group_under_unassigned(api, db, world):
