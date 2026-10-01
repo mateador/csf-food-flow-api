@@ -183,6 +183,22 @@ async def test_food_centre_can_record_out_with_destination(api, world):
 
     assert res.status == 201
     assert res.json["entry"]["destination_location_id"] == world["hub"]
+    assert res.json["entry"]["source_location_id"] is None
+
+
+async def test_out_entry_rejects_a_source_location(api, db, world, make_source_location):
+    """source_location_id ("From") doesn't apply to OUT -- food leaving
+    the centre is being redistributed, not sourced from a donor/shop."""
+    aldi = await make_source_location("Aldi")
+    payload = entry_payload(
+        world["centre"], entry_type="OUT", destination_location_id=world["hub"],
+        source_location_id=aldi,
+    )
+
+    res = await api.post(ENTRIES, user=world["centre_user"], json=payload)
+
+    assert res.status == 422
+    assert await _count_entries(db) == 0
 
 
 async def test_database_constraints_backstop_admin_entries(api, db, world):
@@ -347,6 +363,19 @@ async def test_bulk_requires_source_location(api, db, world):
     missing_source = _queued(world, source_location_id=None)
 
     res = await api.post(BULK, user=world["hub_user"], json={"entries": [missing_source]})
+
+    assert res.json["results"][0]["status"] == "error"
+    assert await _count_entries(db) == 0
+
+
+async def test_bulk_rejects_a_source_location_on_out_entries(api, db, world, make_source_location):
+    aldi = await make_source_location("Aldi")
+    out_with_source = entry_payload(
+        world["centre"], entry_type="OUT", client_uuid=str(uuid.uuid4()),
+        destination_location_id=world["hub"], source_location_id=aldi,
+    )
+
+    res = await api.post(BULK, user=world["centre_user"], json={"entries": [out_with_source]})
 
     assert res.json["results"][0]["status"] == "error"
     assert await _count_entries(db) == 0

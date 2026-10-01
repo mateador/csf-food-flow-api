@@ -672,7 +672,6 @@ paths:
                 - client_uuid
                 - entry_type
                 - location_id
-                - source_location_id
                 - name
                 - food_category_code
                 - gross_weight_kg
@@ -683,9 +682,13 @@ paths:
                 location_id: { type: string, format: uuid }
                 destination_location_id: { type: [string, "null"], format: uuid }
                 source_location_id:
-                  type: string
+                  type: [string, "null"]
                   format: uuid
-                  description: Where the food came from ("From"). Required on every new entry.
+                  description: >
+                    Where the food came from ("From"). Required for IN
+                    entries; must be omitted/null for OUT -- food leaving
+                    the centre is being redistributed, not sourced from a
+                    donor/shop.
                 name: { type: string, description: "Name/description of the item being weighed" }
                 food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
                 gross_weight_kg:
@@ -747,7 +750,6 @@ paths:
                       - client_uuid
                       - entry_type
                       - location_id
-                      - source_location_id
                       - name
                       - food_category_code
                       - gross_weight_kg
@@ -757,7 +759,10 @@ paths:
                       entry_type: { $ref: "#/components/schemas/EntryType" }
                       location_id: { type: string, format: uuid }
                       destination_location_id: { type: [string, "null"], format: uuid }
-                      source_location_id: { type: string, format: uuid }
+                      source_location_id:
+                        type: [string, "null"]
+                        format: uuid
+                        description: Required for IN; must be omitted/null for OUT.
                       name: { type: string, description: "Name/description of the item being weighed" }
                       food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
                       gross_weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }

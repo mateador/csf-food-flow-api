@@ -208,12 +208,18 @@ async def world(make_location, make_user):
 
 
 def entry_payload(location_id, **overrides):
-    """A valid IN entry at `location_id`. Override any field per test."""
+    """A valid IN entry at `location_id`. Override any field per test.
+
+    source_location_id only applies to IN (see migration 0009) -- an
+    overridden entry_type="OUT" gets source_location_id=None by default
+    here too, so callers don't have to remember to clear it themselves.
+    """
+    entry_type = overrides.get("entry_type", "IN")
     payload = {
         "entry_type": "IN",
         "location_id": location_id,
         "destination_location_id": None,
-        "source_location_id": _default_source_location_id,
+        "source_location_id": _default_source_location_id if entry_type == "IN" else None,
         "name": "Tesco Newmarket Road",
         "food_category_code": "FRESH",
         "gross_weight_kg": 10.0,

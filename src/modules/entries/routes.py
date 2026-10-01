@@ -132,11 +132,36 @@ async def create_entry(request):
     trays_input = body.get("trays", [])
 
     if not all(
-        [entry_type, location_id, source_location_id, name, food_category_code, gross_weight_kg,
-         collection_date]
+        [entry_type, location_id, name, food_category_code, gross_weight_kg, collection_date]
     ):
         return json_response(
             {"error": {"code": "VALIDATION_ERROR", "message": "Missing required field"}},
+            status=422,
+        )
+
+    # source_location_id ("From") only means something for IN -- food
+    # leaving the centre (OUT) is just being redistributed, not sourced
+    # from a donor/shop, so it's required for IN and must be absent for
+    # OUT. Checked for every role, unlike the destination rules below
+    # which vary by role.
+    if entry_type == "IN" and not source_location_id:
+        return json_response(
+            {
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "IN entries require a source_location_id",
+                }
+            },
+            status=422,
+        )
+    if entry_type == "OUT" and source_location_id:
+        return json_response(
+            {
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "OUT entries must not have a source_location_id",
+                }
+            },
             status=422,
         )
 
@@ -374,18 +399,26 @@ async def bulk_sync_entries(request):
                 )
                 continue
 
-            # source_location_id is nullable in the DB (it doesn't exist on
-            # entries recorded before this field existed) but required for
-            # every new entry going forward -- checked explicitly here since
-            # a missing value would otherwise be accepted silently instead
-            # of failing the DB's NOT NULL check the way other required
-            # fields do.
-            if not item.get("source_location_id"):
+            # source_location_id ("From") only applies to IN -- same rule
+            # as single-entry create. Nullable in the DB (entries recorded
+            # before this field existed have none), so a missing/unwanted
+            # value wouldn't otherwise fail the DB's NOT NULL check the way
+            # other required fields do -- checked explicitly here instead.
+            if item.get("entry_type") == "IN" and not item.get("source_location_id"):
                 results.append(
                     {
                         "client_uuid": client_uuid,
                         "status": "error",
-                        "message": "source_location_id is required",
+                        "message": "IN entries require a source_location_id",
+                    }
+                )
+                continue
+            if item.get("entry_type") == "OUT" and item.get("source_location_id"):
+                results.append(
+                    {
+                        "client_uuid": client_uuid,
+                        "status": "error",
+                        "message": "OUT entries must not have a source_location_id",
                     }
                 )
                 continue
