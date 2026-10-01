@@ -40,8 +40,12 @@ src/
       0003_add_categories.sql
       0004_add_trays.sql    -- tray types, gross/net weight split
       0005_login_codes.sql  -- replaces magic-link tokens
+      0006_login_codes_drop_hash_unique.sql
+      0007_add_source_locations.sql -- "From" on Food In, source_locations table
+      0008_add_other_source_location.sql
+      0009_out_entries_have_no_source_location.sql
     migrate.py            -- migration runner (version-table pattern)
-    seed.py               -- idempotent seed (categories, locations, admin)
+    seed.py               -- idempotent seed (categories, locations, source locations, admin)
     client.py             -- asyncpg connection pool
   middleware/
     auth.py               -- session validation, role-requirement decorator
@@ -49,6 +53,7 @@ src/
     auth/                 -- login code request/verify, /me
     entries/              -- weigh-in/out CRUD, bulk offline sync
     locations/            -- hub/centre CRUD
+    source_locations/     -- "From" (donor/shop) list for Food In, admin CRUD
     categories/           -- food category list
     tray_types/           -- tray types used for net weight
     reports/              -- weekly totals, CSV export
@@ -170,8 +175,10 @@ python -m src.db.migrate   # idempotent -- safe to run repeatedly
 python -m src.db.seed      # idempotent -- safe to run repeatedly
 ```
 
-Seeds: six food categories, one example hub, one example food centre, and
-one admin account (override the email with `SEED_ADMIN_EMAIL`).
+Seeds: six food categories, one example hub, one example food centre, the
+11 source locations ("From" on Food In -- the donor/shop list plus
+"Other"), and one admin account (override the email with
+`SEED_ADMIN_EMAIL`).
 
 ## Neon PostgreSQL Connection Notes
 
