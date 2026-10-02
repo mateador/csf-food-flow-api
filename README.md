@@ -1,8 +1,49 @@
 # CSF Food Flow API
 
-Backend for the Cambridge Sustainable Food App's Food Flow Log — records
-weigh-in and weigh-out events at hubs and the food centre, enforces
-role-based access server-side, and produces weekly reports.
+[![CI / Deploy](https://github.com/mateador/csf-food-flow-api/actions/workflows/ci-deploy.yml/badge.svg)](https://github.com/mateador/csf-food-flow-api/actions/workflows/ci-deploy.yml)
+[![Uptime check](https://github.com/mateador/csf-food-flow-api/actions/workflows/uptime.yml/badge.svg)](https://github.com/mateador/csf-food-flow-api/actions/workflows/uptime.yml)
+[![Nightly backup](https://github.com/mateador/csf-food-flow-api/actions/workflows/backup.yml/badge.svg)](https://github.com/mateador/csf-food-flow-api/actions/workflows/backup.yml)
+
+The backend of the Cambridge Sustainable Food App's Food Flow Log. It
+records food arriving at and leaving community hubs and the food centre
+(weigh-in and weigh-out entries), enforces who can record what and where,
+and produces the weekly reports that replace the hubs' paper sheets.
+
+**Status:** in trial with volunteers at CSF hubs, ahead of an adoption
+decision. The frontend is
+[csf-food-flow-pwa](https://github.com/mateador/csf-food-flow-pwa).
+
+## At a glance
+
+- **Stack:** Python 3.12, Sanic, raw `asyncpg` on Neon Postgres, in a
+  Docker container on Azure Container Apps.
+- **Releases:** every push to `main` runs 128 tests against a real
+  Postgres database, and deploys to Azure only if they pass.
+- **Sign-in:** an emailed one-time code, then an httpOnly session cookie.
+  Permissions are re-read from the database on every request.
+- **Operations:** liveness and readiness endpoints, uptime checks in hub
+  hours, nightly backups verified by a test restore.
+
+## Endpoints
+
+All under `/api/v1`. `docs/openapi.yaml` is the full contract.
+
+| Endpoint | Who | What |
+|---|---|---|
+| `POST /auth/code/request`, `POST /auth/code/verify` | Anyone | Sign in with an emailed 4-digit code |
+| `POST /auth/logout` | Anyone | Expire the session cookie on this device |
+| `GET /me` | Signed in | The signed-in user |
+| `POST /entries/` | Signed in | Record a weigh-in or weigh-out. Hub users: Food In at their own hub only |
+| `GET /entries/` | Signed in | List entries (hub users: their own hub only) |
+| `POST /entries/bulk` | Signed in | Upload entries recorded offline. Idempotent by `client_uuid` |
+| `GET /reports/weekly` | Signed in | Monday-to-Sunday totals by category, location and source (hub users: own hub) |
+| `GET /reports/weekly/export.csv` | Admin | The same week as CSV |
+| `GET /locations/`, `GET /categories/`, `GET /tray-types/`, `GET /source-locations/` | Signed in | Reference data for the forms |
+| `POST`/`PATCH` on `/locations/`, `/source-locations/`, `/users/`, and `GET /users/` | Admin | Manage hubs, the "From" list and users |
+| `GET /health`, `GET /health/ready` | Anyone | Liveness, and readiness (database reachable) |
+
+Net weight is always worked out by the server from gross weight and trays.
+A net weight sent by the client is ignored.
 
 ## Architecture Overview
 
@@ -131,6 +172,11 @@ pytest
 Afterwards, `docker stop csf-test-db` stops it and `docker start csf-test-db`
 brings it back. No real email is sent during tests.
 
+128 tests, across `tests/test_auth.py` (sign-in limits, sessions,
+sign-out, housekeeping), `test_entries.py` (role rules, net weight, bulk
+sync), `test_reports.py` (totals, CSV), `test_admin.py` and
+`test_health.py`.
+
 Tests marked `xfail` describe a known bug: they state the correct
 behaviour, and are expected to fail until that bug is fixed. Each one's
 `reason` says what's wrong.
@@ -191,9 +237,9 @@ You need **two** connection strings from your Neon dashboard:
 
 ## Deployment
 
-**API → Azure Container Apps.** The image is built locally from
-`Dockerfile`, pushed to Azure Container Registry, and run on Azure
-Container Apps.
+**API → Azure Container Apps.** GitHub Actions builds the image from
+`Dockerfile`, pushes it to Azure Container Registry, and updates the
+container app (see "Releasing a new version").
 
 - **Registry**: `csfacrmateador.azurecr.io`, image `csf-api`
 - **Container app**: `csf-api`, resource group `csf-rg`, UK South region
@@ -224,9 +270,10 @@ through `.github/workflows/ci-deploy.yml`:
    `git-<first 7 characters of the commit>`, so every image is unique and
    traceable to its commit.
 3. The container app is updated to that image, creating a new revision.
-4. The new revision's own address is polled on `/api/v1/health` for up to
-   five minutes. Until the new revision is ready, the app keeps serving
-   the previous one.
+4. The new revision's own address is polled on `/api/v1/health/ready`
+   for up to five minutes, so a revision that starts but can't reach the
+   database fails the deploy. Until the new revision is ready, the app
+   keeps serving the previous one.
 
 The run's summary shows the image it deployed and the rollback command
 for the image that was running before. Pull requests run the tests only.
@@ -357,3 +404,12 @@ psql postgresql://postgres:restore@localhost:5434/postgres -c "SELECT count(*) F
   a manual discipline (see `docs/CONTRACT.md`). CI compares the two copies
   on every run and warns when they differ, but doesn't block a deploy,
   because one repo is always updated before the other.
+- **A6** — `docs/openapi.yaml` describes three entry endpoints that aren't
+  implemented: `GET /entries/{id}`, `PATCH /entries/{id}` and
+  `POST /entries/{id}/void`. Entries can't yet be corrected or voided
+  through the API. Either implement them (the PWA's entry detail page
+  needs the first), or remove them from the contract.
+- **A7** — Sanic Extensions also serves its own auto-generated API docs at
+  `/docs` on the container app's address. That's separate from
+  `docs/openapi.yaml`, which is the real contract. Turn it off
+  (`app.config.OAS = False`) unless it's wanted.

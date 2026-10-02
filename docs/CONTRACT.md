@@ -14,11 +14,11 @@ consumers.
 
 ## How each side uses it
 
-- **This repo (API)**: `src/` route handlers are hand-implemented against
-  this spec using `msgspec` structs (Step 4). There is no automatic
-  codegen from YAML to Python in this project — the discipline is manual:
-  when a route's shape changes, update this file and the corresponding
-  `msgspec` struct in the same commit.
+- **This repo (API)**: route handlers in `src/modules/` are written by
+  hand against this spec, and validate request bodies themselves. There is
+  no codegen from YAML to Python and no schema library in between, so the
+  discipline is manual: when a route's shape changes, update this file and
+  the handler in the same commit.
 
 - **PWA repo**: TypeScript types are **mechanically generated** from this
   exact file via `npm run generate:types` (using `openapi-typescript`),
@@ -32,10 +32,19 @@ consumers.
 2. Copy the updated file to `csf-food-flow-pwa/docs/openapi.yaml`.
 3. In the PWA repo, run `npm run generate:types` and commit the regenerated
    `src/types/api.ts` alongside the copied spec.
-4. Update the corresponding `msgspec` struct(s) in this repo's route
-   handlers to match.
+4. Update the corresponding route handler(s) in this repo to match, in the
+   same commit as step 1.
 
-There is no CI check enforcing this today — it's a documented discipline,
-not an automated guarantee. Worth adding a CI step later that fails the
-build if the two `openapi.yaml` copies diverge (a simple `diff` in GitHub
-Actions would catch it) if this becomes a real pain point in practice.
+## What CI checks
+
+- **PWA repo:** CI fails if `src/types/api.ts` doesn't match the PWA's own
+  copy of `docs/openapi.yaml` (it regenerates the types and diffs them).
+- **This repo:** CI compares this file with the PWA's copy on `main` and
+  **warns** if they differ. It's a warning rather than a failure because
+  one repo is always updated before the other, and that must not block a
+  deploy.
+
+Neither check proves the API actually implements what this file
+describes. That's still the manual discipline in step 4 above. (At the
+time of writing, three entry endpoints are described here but not
+implemented; see the API README, A6.)
