@@ -182,6 +182,10 @@ async def weekly_export_csv(request):
     net weight) -- PENDING validation against the real CSF spreadsheet
     template. See docs/CONTRACT.md and the root README's "Known
     assumptions" section.
+
+    Rows are sorted by category first (collection date, then location, as
+    tie-breakers within a category) -- an explicit request, not part of
+    the placeholder layout above.
     """
     raw_week_start = request.args.get("week_start")
     if not raw_week_start:
@@ -211,7 +215,7 @@ async def weekly_export_csv(request):
                 JOIN locations l ON l.id = we.location_id
                 LEFT JOIN source_locations sl ON sl.id = we.source_location_id
                 WHERE {' AND '.join(conditions)}
-                ORDER BY we.collection_date, l.name""",
+                ORDER BY we.food_category_code, we.collection_date, l.name""",
             *params,
         )
 

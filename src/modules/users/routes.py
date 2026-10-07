@@ -1,10 +1,15 @@
+import re
+
 from sanic import Blueprint
 from sanic.response import json as json_response
 
 from src.db.client import pool
 from src.middleware.auth import require_auth, require_role
+from src.modules.auth.service import admin_reset_pin
 
 users_bp = Blueprint("users", url_prefix="/users")
+
+PIN_PATTERN = re.compile(r"^\d{4}$")
 
 
 def _serialize_user(row) -> dict:
@@ -106,3 +111,40 @@ async def update_user(request, user_id):
     if not row:
         return json_response({"error": {"code": "NOT_FOUND", "message": "User not found"}}, status=404)
     return json_response(_serialize_user(row))
+
+
+@users_bp.patch("/<user_id>/pin")
+@require_auth
+@require_role("ADMIN")
+async def reset_user_pin(request, user_id):
+    """Recovery path for a forgotten PIN -- deliberately no current-pin
+    check (see service.admin_reset_pin), since the whole point is that the
+    admin doesn't know the old one. Any admin can reset any user's PIN,
+    including another admin's, so this is logged to audit_log."""
+    body = request.json or {}
+    pin = (body.get("pin") or "").strip()
+    pin_confirm = (body.get("pin_confirm") or "").strip()
+
+    if not PIN_PATTERN.match(pin):
+        return json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "pin must be 4 digits"}}, status=422
+        )
+    if pin != pin_confirm:
+        return json_response(
+            {"error": {"code": "VALIDATION_ERROR", "message": "pin and pin_confirm must match"}},
+            status=422,
+        )
+
+    user = await admin_reset_pin(user_id, pin)
+    if not user:
+        return json_response({"error": {"code": "NOT_FOUND", "message": "User not found"}}, status=404)
+
+    async with pool().acquire() as conn:
+        await conn.execute(
+            """INSERT INTO audit_log (entity_type, entity_id, user_id, action)
+               VALUES ('USER', $1, $2, 'UPDATE')""",
+            user_id,
+            request.ctx.user["sub"],
+        )
+
+    return json_response(_serialize_user(user))

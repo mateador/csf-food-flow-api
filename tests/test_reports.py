@@ -211,3 +211,24 @@ async def test_csv_export_rows(api, world):
         ["2026-09-21", "North Hub", "Tesco", "IN", "Tesco Newmarket Road", "FRESH", "10.0",
          "2x Medium", "6.8"],
     ]
+
+
+async def test_csv_export_rows_are_sorted_by_category_first(api, world):
+    """Category (column F) is the primary sort; collection date is only a
+    tie-breaker within a category, not the primary order."""
+    await _record(api, world["hub_user"], world["hub"], name="Later frozen",
+                  food_category_code="FROZEN", collection_date="2026-09-23")
+    await _record(api, world["hub_user"], world["hub"], name="Earlier ambient",
+                  food_category_code="AMBIENT", collection_date="2026-09-22")
+    await _record(api, world["hub_user"], world["hub"], name="Later ambient",
+                  food_category_code="AMBIENT", collection_date="2026-09-24")
+
+    res = await api.get(CSV, user=world["admin"], params={"week_start": MONDAY.isoformat()})
+
+    rows = list(csv.reader(io.StringIO(res.text)))
+    names_and_categories = [(row[4], row[5]) for row in rows[1:]]
+    assert names_and_categories == [
+        ("Earlier ambient", "AMBIENT"),
+        ("Later ambient", "AMBIENT"),
+        ("Later frozen", "FROZEN"),
+    ]

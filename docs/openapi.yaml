@@ -380,6 +380,143 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
 
+  /auth/pin/check:
+    post:
+      operationId: checkPinStatus
+      summary: Tell the frontend whether this email needs first-time PIN setup
+      description: >
+        Unlike /auth/code/request, this does reveal a little about account
+        state (whether an active account exists and hasn't set a PIN yet)
+        -- a deliberate trade-off for the PIN login flow, not an oversight.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [needs_setup]
+                properties:
+                  needs_setup: { type: boolean }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/pin/set:
+    post:
+      operationId: setPin
+      summary: First-time PIN setup, then establish a session
+      description: >
+        Succeeds only for an active user who doesn't have a PIN yet.
+        Changing an existing PIN goes through PATCH /auth/pin (self) or
+        PATCH /users/{id}/pin (admin reset), never this endpoint.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, pin, pin_confirm]
+              properties:
+                email: { type: string, format: email }
+                pin: { type: string, pattern: "^[0-9]{4}$" }
+                pin_confirm: { type: string, pattern: "^[0-9]{4}$" }
+      responses:
+        "200":
+          description: Sets the httpOnly session cookie via Set-Cookie.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "409":
+          description: >
+            This account already has a PIN, or doesn't exist/isn't active
+            -- error.code is PIN_ALREADY_SET.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/pin/login:
+    post:
+      operationId: loginWithPin
+      summary: Sign in with email and PIN
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, pin]
+              properties:
+                email: { type: string, format: email }
+                pin: { type: string, pattern: "^[0-9]{4}$" }
+      responses:
+        "200":
+          description: Sets the httpOnly session cookie via Set-Cookie.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user]
+                properties:
+                  user: { $ref: "#/components/schemas/User" }
+        "401":
+          description: Incorrect email or PIN -- error.code is INVALID_PIN.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /auth/pin:
+    patch:
+      operationId: changePin
+      summary: Change the signed-in user's own PIN
+      description: >
+        Requires the current PIN, not just a valid session -- this app
+        runs on shared tablets that can stay signed in between volunteers.
+      security: [{ cookieAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_pin, pin, pin_confirm]
+              properties:
+                current_pin: { type: string, pattern: "^[0-9]{4}$" }
+                pin: { type: string, pattern: "^[0-9]{4}$" }
+                pin_confirm: { type: string, pattern: "^[0-9]{4}$" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [changed] }
+        "401":
+          description: Current PIN is incorrect, or not signed in.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
   /auth/logout:
     post:
       operationId: logout
@@ -1025,3 +1162,38 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { description: Not found }
+
+  /users/{id}/pin:
+    patch:
+      operationId: resetUserPin
+      summary: Reset a user's PIN (admin recovery path for a forgotten PIN)
+      description: >
+        No current-PIN check -- this is the recovery path for someone who's
+        forgotten theirs. Any admin may reset any user's PIN, including
+        another admin's; each reset is recorded in the audit log.
+      security: [{ cookieAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pin, pin_confirm]
+              properties:
+                pin: { type: string, pattern: "^[0-9]{4}$" }
+                pin_confirm: { type: string, pattern: "^[0-9]{4}$" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { description: Not found }
+        "422": { $ref: "#/components/responses/ValidationError" }

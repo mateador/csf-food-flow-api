@@ -143,6 +143,112 @@ async def verify_and_consume_login_code(email: str, raw_code: str) -> dict | str
             return dict(user_row)
 
 
+# --- PIN login -------------------------------------------------------------
+#
+# Replaces the emailed one-time code as the PWA's default sign-in flow
+# (see migration 0010). The emailed-code system above is untouched and
+# still fully reachable -- kept dormant rather than removed, so it can
+# come back later as a frontend-only change.
+#
+# This PIN is a long-lived, reusable credential, not a one-time code: by
+# explicit product decision there is no expiry and no attempt lockout on
+# it. That decision trades real security for lower setup friction, and
+# it means _hash_pin's weakness (below) is a bigger deal than the
+# identically-shaped _hash_code above, which only ever relied on expiry
+# and lockout for its real protection.
+
+
+def _hash_pin(email: str, pin: str) -> str:
+    # Same shape as _hash_code, for consistency -- and the same caveat
+    # applies, more sharply: with no lockout and a reusable value, this
+    # hash is the only thing between a database leak and every account's
+    # live credential. Revisit this alongside the "proper security" pass
+    # PIN login is explicitly deferring.
+    return hashlib.sha256(f"{email}:{pin}".encode()).hexdigest()
+
+
+async def pin_needs_setup(email: str) -> bool:
+    """True only for an active user who hasn't chosen a PIN yet. False for
+    an inactive or unknown email too -- callers only need "show the
+    first-time-setup form or not", not "does this account exist"."""
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT pin_hash FROM users WHERE email = $1 AND active = true", email
+        )
+    return row is not None and row["pin_hash"] is None
+
+
+async def set_initial_pin(email: str, pin: str) -> dict | None:
+    """First-time PIN setup. Succeeds only for an active user who doesn't
+    have a PIN yet -- the WHERE clause is the atomic guard against a race
+    between two tabs both setting one up at once. Returns the user row on
+    success (the caller signs them in), None otherwise."""
+    pin_hash = _hash_pin(email, pin)
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE users SET pin_hash = $1, last_login_at = now()
+               WHERE email = $2 AND active = true AND pin_hash IS NULL
+               RETURNING *""",
+            pin_hash,
+            email,
+        )
+    return dict(row) if row else None
+
+
+async def verify_pin(email: str, pin: str) -> dict | str:
+    """
+    Returns:
+        dict          -- the user row, on success
+        "INVALID_PIN" -- wrong pin, no pin set yet, or no such active user
+    """
+    pin_hash = _hash_pin(email, pin)
+    async with pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE users SET last_login_at = now()
+               WHERE email = $1 AND active = true AND pin_hash = $2
+               RETURNING *""",
+            email,
+            pin_hash,
+        )
+    return dict(row) if row else "INVALID_PIN"
+
+
+async def change_own_pin(user_id: str, current_pin: str, new_pin: str) -> bool:
+    """Requires the CURRENT pin, not just a valid session. This app runs on
+    shared tablets that can stay signed in between volunteers, so proving
+    the caller actually knows the existing PIN is what stops one volunteer
+    silently locking another out of their account."""
+    async with pool().acquire() as conn:
+        user_row = await conn.fetchrow(
+            "SELECT email, pin_hash FROM users WHERE id = $1 AND active = true", user_id
+        )
+        if not user_row or user_row["pin_hash"] != _hash_pin(user_row["email"], current_pin):
+            return False
+        await conn.execute(
+            "UPDATE users SET pin_hash = $1 WHERE id = $2",
+            _hash_pin(user_row["email"], new_pin),
+            user_id,
+        )
+    return True
+
+
+async def admin_reset_pin(user_id: str, new_pin: str) -> dict | None:
+    """Recovery path for a forgotten PIN -- deliberately no current-pin
+    check, unlike change_own_pin. Returns the updated user row, or None if
+    the user doesn't exist. Caller (users/routes.py) is responsible for
+    requiring ADMIN and for audit-logging the reset."""
+    async with pool().acquire() as conn:
+        user_row = await conn.fetchrow("SELECT email FROM users WHERE id = $1", user_id)
+        if not user_row:
+            return None
+        row = await conn.fetchrow(
+            "UPDATE users SET pin_hash = $1 WHERE id = $2 RETURNING *",
+            _hash_pin(user_row["email"], new_pin),
+            user_id,
+        )
+    return dict(row) if row else None
+
+
 def issue_session_jwt(user: dict) -> str:
     now = datetime.now(timezone.utc)
     payload = {
