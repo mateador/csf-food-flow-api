@@ -17,10 +17,13 @@ decision. The frontend is
 
 - **Stack:** Python 3.12, Sanic, raw `asyncpg` on Neon Postgres, in a
   Docker container on Azure Container Apps.
-- **Releases:** every push to `main` runs 128 tests against a real
+- **Releases:** every push to `main` runs 162 tests against a real
   Postgres database, and deploys to Azure only if they pass.
-- **Sign-in:** an emailed one-time code, then an httpOnly session cookie.
-  Permissions are re-read from the database on every request.
+- **Sign-in:** email + a 4-digit PIN the user chooses on first sign-in,
+  then an httpOnly session cookie. Permissions are re-read from the
+  database on every request. (An emailed one-time code is also fully
+  implemented and reachable, just not what the PWA's login page uses --
+  see "Authentication" below.)
 - **Operations:** liveness and readiness endpoints, uptime checks in hub
   hours, nightly backups verified by a test restore.
 
@@ -30,7 +33,12 @@ All under `/api/v1`. `docs/openapi.yaml` is the full contract.
 
 | Endpoint | Who | What |
 |---|---|---|
-| `POST /auth/code/request`, `POST /auth/code/verify` | Anyone | Sign in with an emailed 4-digit code |
+| `POST /auth/pin/check` | Anyone | Does this email need first-time PIN setup, or a normal PIN login |
+| `POST /auth/pin/set` | Anyone | First-time PIN setup, then sign in |
+| `POST /auth/pin/login` | Anyone | Sign in with email + PIN |
+| `PATCH /auth/pin` | Signed in | Change my own PIN (requires the current one) |
+| `PATCH /users/{id}/pin` | Admin | Reset any user's PIN -- the forgotten-PIN recovery path, logged to `audit_log` |
+| `POST /auth/code/request`, `POST /auth/code/verify` | Anyone | Emailed one-time code sign-in. Fully working, not currently used by the PWA |
 | `POST /auth/logout` | Anyone | Expire the session cookie on this device |
 | `GET /me` | Signed in | The signed-in user |
 | `POST /entries/` | Signed in | Record a weigh-in or weigh-out. Hub users: Food In at their own hub only |
@@ -50,7 +58,7 @@ A net weight sent by the client is ignored.
 - **Framework**: Sanic (async-first Python), see `src/app.py`
 - **Database**: PostgreSQL on Neon, raw `asyncpg` (no ORM — see
   `src/db/README.md` for why)
-- **Auth**: passwordless 4-digit email login code, then an httpOnly
+- **Auth**: passwordless -- email + a 4-digit PIN, then an httpOnly
   session cookie (JWT). See "Authentication" below.
 - **Hosting**: containerised, running on Azure Container Apps. See
   "Deployment" below.
@@ -91,7 +99,7 @@ src/
   middleware/
     auth.py               -- session validation, role-requirement decorator
   modules/
-    auth/                 -- login code request/verify, /me
+    auth/                 -- PIN login/setup/change, emailed-code login (dormant), /me
     entries/              -- weigh-in/out CRUD, bulk offline sync
     locations/            -- hub/centre CRUD
     source_locations/     -- "From" (donor/shop) list for Food In, admin CRUD
@@ -135,10 +143,15 @@ python -m src.db.seed             # seed categories, locations, admin user
 python -m src.app                 # start the server (default :8000)
 ```
 
-Without `RESEND_API_KEY` set, login codes print to the console instead of
-being emailed, so local development never needs a real email provider.
-Look for the `LOGIN CODE (console fallback)` block in your terminal after
-requesting a code.
+Signing in locally needs nothing special: the seeded admin user has no
+PIN set, so signing in through the local PWA lands on the normal
+first-time "choose a PIN" screen, same as production. The note below
+only applies if you're exercising the dormant emailed-code endpoints
+directly (see "Authentication") -- without `RESEND_API_KEY` set, those
+codes print to the console instead of being emailed, so local
+development never needs a real email provider. Look for the
+`LOGIN CODE (console fallback)` block in your terminal after requesting
+one.
 
 ### Running the container locally
 
@@ -183,10 +196,51 @@ behaviour, and are expected to fail until that bug is fixed. Each one's
 
 ## Authentication
 
-Sign-in is a two-step flow on one page of the PWA: the user enters their
-email, receives a 4-digit code, and enters it in the same tab. Because a
-4-digit code has only 10,000 possible values, the protection comes from
-limits rather than from the code itself:
+**Sign-in is email + a 4-digit PIN the user chooses themselves, on one
+page of the PWA.** First time: enter email, get offered "choose a PIN"
+(two fields, PIN + confirm), pick any 4 digits, done -- signed in
+immediately, nothing emailed or printed anywhere. Every time after that:
+enter email, enter that same PIN.
+
+This PIN is a long-lived, reusable credential, not a one-time code -- by
+explicit product decision, chosen over the stronger emailed-code system
+below for lower setup friction while the app is still in trial. That
+decision has a real cost, stated plainly rather than glossed over:
+
+- **No expiry, no attempt lockout.** Unlike the emailed code below, a
+  wrong PIN guess is never rate-limited or locked out at all.
+- **The hash is weak against a database leak.** `pin_hash` is
+  `sha256(email:pin)`, the same shape used for the emailed code's hash --
+  but that hash only ever relied on expiry and lockout for its real
+  protection, both of which PINs don't have. With only 10,000 possible
+  4-digit values, anyone with read access to the `users` table can
+  recover every PIN in well under a second.
+- **Existing users were bootstrapped to a shared PIN (`1717`)** when this
+  system was introduced (migration `0010`), so nobody was locked out. It
+  stays `1717` until each person changes it (see the mitigations just
+  below).
+
+Mitigations that do exist: `PATCH /auth/pin` (self-service change)
+requires the *current* PIN, not just a valid session, specifically
+because this app runs on shared tablets that can stay signed in between
+volunteers. `PATCH /users/{id}/pin` (admin reset, for a forgotten PIN) is
+logged to `audit_log`, since any admin can reset any other user's PIN,
+including another admin's.
+
+On success the API sets an httpOnly, `SameSite=Lax` session cookie (a JWT,
+`Secure` in production) valid for `ACCESS_TOKEN_TTL_MINUTES` (default 12
+hours).
+
+Signing out is `POST /auth/logout`, which expires the cookie on that
+device. The browser can't delete an httpOnly cookie itself, so without
+this call a shared device would stay signed in as the previous person.
+
+### Emailed one-time code (implemented, not currently used)
+
+A second, stronger sign-in system still exists in full and still works
+(`POST /auth/code/request`, `POST /auth/code/verify`) -- the PWA's login
+page just doesn't call it. Kept dormant rather than removed, so bringing
+it back (or offering both) is a frontend change, not a rebuild:
 
 - **Expiry**: a code is valid for `LOGIN_CODE_TTL_MINUTES` (default 10)
   and can be used once.
@@ -204,13 +258,44 @@ limits rather than from the code itself:
 - Codes are stored hashed (SHA-256, salted with the email), never in
   plaintext.
 
-On success the API sets an httpOnly, `SameSite=Lax` session cookie (a JWT,
-`Secure` in production) valid for `ACCESS_TOKEN_TTL_MINUTES` (default 12
-hours).
+### Creating a user
 
-Signing out is `POST /auth/logout`, which expires the cookie on that
-device. The browser can't delete an httpOnly cookie itself, so without
-this call a shared device would stay signed in as the previous person.
+There's no admin UI for this yet (`AdminUsers` in the PWA is read-only --
+see that repo's README, "Known Assumptions" A3), so for now it means
+calling the API directly. Get a session cookie first, then create the
+account:
+
+```bash
+# 1. Sign in as yourself (an existing ADMIN) and save the session cookie
+curl -s -c /tmp/csf-admin-cookies.txt \
+  -X POST https://csf-api.bravebush-24fde88f.uksouth.azurecontainerapps.io/api/v1/auth/pin/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "YOUR-ADMIN-EMAIL", "pin": "YOUR-ADMIN-PIN"}'
+
+# 2a. FOOD_CENTRE staff -- no location needed
+curl -s -b /tmp/csf-admin-cookies.txt \
+  -X POST https://csf-api.bravebush-24fde88f.uksouth.azurecontainerapps.io/api/v1/users/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Sarah", "email": "sarah@example.org", "role": "FOOD_CENTRE"}'
+
+# 2b. HUB volunteer -- needs location_id. Find it first:
+curl -s -b /tmp/csf-admin-cookies.txt \
+  https://csf-api.bravebush-24fde88f.uksouth.azurecontainerapps.io/api/v1/locations/
+# ...then:
+curl -s -b /tmp/csf-admin-cookies.txt \
+  -X POST https://csf-api.bravebush-24fde88f.uksouth.azurecontainerapps.io/api/v1/users/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Sarah", "email": "sarah@example.org", "role": "HUB", "location_id": "THE-HUB-ID-FROM-ABOVE"}'
+```
+
+A real PIN in a terminal command lands in shell history -- prefix the
+line with a space (skipped by history on most shells with
+`HISTCONTROL=ignorespace`/`ignoreboth`) or clear it after
+(`history -d <line>` / `history -c`) if that matters to you.
+
+The new person doesn't need anything further from you: they open the
+PWA, enter their own email, and land straight on the "choose a PIN"
+first-time setup screen, since their account starts with no PIN set.
 
 ## Database Migration and Seed Instructions
 
