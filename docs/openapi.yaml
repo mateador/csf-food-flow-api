@@ -109,9 +109,36 @@ components:
       type: object
       description: >
         Where food came from before being delivered to a hub or food
-        centre (a shop, donor, or "From" on Food In / Food Out) -- distinct
-        from Location, which is the hub/food-centre the entry is recorded
-        at.
+        centre (a shop or donor -- "From" on Food In only). Distinct from
+        Location (the hub/food-centre the entry is recorded at) and from
+        OutSource, a different, Weigh-out-only concept that happens to
+        share the same "From" field label on the form.
+      required: [id, name, active]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        active: { type: boolean }
+
+    OutDestination:
+      type: object
+      description: >
+        "Destination" on Weigh-out -- an internal program or use the food
+        goes to (e.g. a cafe, catering, a named event), not a physical
+        hub. Unrelated to Location/destination_location_id, which used to
+        be how Weigh-out's destination worked.
+      required: [id, name, active]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        active: { type: boolean }
+
+    OutSource:
+      type: object
+      description: >
+        "From" on Weigh-out -- a surplus/donation classification (e.g.
+        gleaned, farm, Fareshare paid), not a shop/donor name. A
+        different concept from SourceLocation (Food In's "From"), despite
+        the shared field label.
       required: [id, name, active]
       properties:
         id: { type: string, format: uuid }
@@ -133,6 +160,8 @@ components:
         - entry_type
         - location_id
         - source_location_id
+        - out_destination_id
+        - out_source_id
         - name
         - food_category_code
         - gross_weight_kg
@@ -148,15 +177,39 @@ components:
         client_uuid: { type: [string, "null"], format: uuid }
         entry_type: { $ref: "#/components/schemas/EntryType" }
         location_id: { type: string, format: uuid }
-        destination_location_id: { type: [string, "null"], format: uuid }
+        destination_location_id:
+          type: [string, "null"]
+          format: uuid
+          description: >
+            Legacy "which hub" destination. No longer required or
+            collected for OUT -- see out_destination_id. Null on every
+            entry created going forward; may be set on entries recorded
+            before this change.
         source_location_id:
           type: [string, "null"]
           format: uuid
           description: >
-            Where the food came from ("From"). Required on every entry
-            created going forward; null only on entries recorded before
-            this field existed.
-        name: { type: string, description: "Name/description of the item being weighed" }
+            Where the food came from ("From" on Food In only). Required
+            for IN; null for OUT and for entries recorded before this
+            field existed.
+        out_destination_id:
+          type: [string, "null"]
+          format: uuid
+          description: >
+            "Destination" on Weigh-out -- an internal program/use, see
+            OutDestination. Required for OUT; null for IN.
+        out_source_id:
+          type: [string, "null"]
+          format: uuid
+          description: >
+            "From" on Weigh-out -- a surplus classification, see
+            OutSource (a different concept from source_location_id).
+            Required for OUT; null for IN.
+        name:
+          type: [string, "null"]
+          description: >
+            Name/description of the item being weighed. Required for IN;
+            optional for OUT (the form no longer collects one).
         food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
         gross_weight_kg:
           type: number
@@ -581,6 +634,42 @@ paths:
                 items: { $ref: "#/components/schemas/TrayType" }
         "401": { $ref: "#/components/responses/Unauthorized" }
 
+  /out-destinations:
+    get:
+      operationId: listOutDestinations
+      summary: List active Weigh-out "Destination" values, for the form dropdown
+      description: >
+        Fixed reference list, GET-only (no admin CRUD, unlike
+        SourceLocation) -- see OutDestination.
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OutDestination" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /out-sources:
+    get:
+      operationId: listOutSources
+      summary: List active Weigh-out "From" values, for the form dropdown
+      description: >
+        Fixed reference list, GET-only (no admin CRUD, unlike
+        SourceLocation) -- see OutSource.
+      security: [{ cookieAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/OutSource" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
   /locations:
     get:
       operationId: listLocations
@@ -761,6 +850,12 @@ paths:
         - name: source_location_id
           in: query
           schema: { type: string, format: uuid }
+        - name: out_destination_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: out_source_id
+          in: query
+          schema: { type: string, format: uuid }
         - name: entry_type
           in: query
           schema: { $ref: "#/components/schemas/EntryType" }
@@ -795,9 +890,10 @@ paths:
       summary: Create a single weigh-in or weigh-out entry
       description: >
         Role rules enforced server-side: HUB may only create IN entries at
-        their own assigned location with destination_location_id null;
-        FOOD_CENTRE may create IN at the centre or OUT to any hub; ADMIN may
-        create either for any valid location.
+        their own assigned location; FOOD_CENTRE may create IN at the
+        centre or OUT; ADMIN may create either for any valid location.
+        IN requires name and source_location_id; OUT requires
+        out_destination_id and out_source_id instead (see those fields).
       security: [{ cookieAuth: [] }]
       requestBody:
         required: true
@@ -809,7 +905,6 @@ paths:
                 - client_uuid
                 - entry_type
                 - location_id
-                - name
                 - food_category_code
                 - gross_weight_kg
                 - collection_date
@@ -817,16 +912,38 @@ paths:
                 client_uuid: { type: string, format: uuid }
                 entry_type: { $ref: "#/components/schemas/EntryType" }
                 location_id: { type: string, format: uuid }
-                destination_location_id: { type: [string, "null"], format: uuid }
+                destination_location_id:
+                  type: [string, "null"]
+                  format: uuid
+                  description: >
+                    Legacy "which hub" destination. No longer required or
+                    read for OUT -- see out_destination_id.
                 source_location_id:
                   type: [string, "null"]
                   format: uuid
                   description: >
-                    Where the food came from ("From"). Required for IN
-                    entries; must be omitted/null for OUT -- food leaving
-                    the centre is being redistributed, not sourced from a
-                    donor/shop.
-                name: { type: string, description: "Name/description of the item being weighed" }
+                    Where the food came from ("From" on Food In). Required
+                    for IN; must be omitted/null for OUT.
+                out_destination_id:
+                  type: [string, "null"]
+                  format: uuid
+                  description: >
+                    "Destination" on Weigh-out (an internal program/use,
+                    see OutDestination). Required for OUT; must be
+                    omitted/null for IN.
+                out_source_id:
+                  type: [string, "null"]
+                  format: uuid
+                  description: >
+                    "From" on Weigh-out (a surplus classification, see
+                    OutSource -- a different concept from
+                    source_location_id). Required for OUT; must be
+                    omitted/null for IN.
+                name:
+                  type: [string, "null"]
+                  description: >
+                    Name/description of the item being weighed. Required
+                    for IN; optional for OUT.
                 food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
                 gross_weight_kg:
                   type: number
@@ -887,7 +1004,6 @@ paths:
                       - client_uuid
                       - entry_type
                       - location_id
-                      - name
                       - food_category_code
                       - gross_weight_kg
                       - collection_date
@@ -900,7 +1016,19 @@ paths:
                         type: [string, "null"]
                         format: uuid
                         description: Required for IN; must be omitted/null for OUT.
-                      name: { type: string, description: "Name/description of the item being weighed" }
+                      out_destination_id:
+                        type: [string, "null"]
+                        format: uuid
+                        description: Required for OUT; must be omitted/null for IN.
+                      out_source_id:
+                        type: [string, "null"]
+                        format: uuid
+                        description: Required for OUT; must be omitted/null for IN.
+                      name:
+                        type: [string, "null"]
+                        description: >
+                          Name/description of the item being weighed.
+                          Required for IN; optional for OUT.
                       food_category_code: { $ref: "#/components/schemas/FoodCategoryCode" }
                       gross_weight_kg: { type: number, exclusiveMinimum: 0, maximum: 1000 }
                       trays:

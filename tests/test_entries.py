@@ -118,6 +118,46 @@ async def test_required_fields(api, world, missing):
     assert res.status == 422
 
 
+@pytest.mark.parametrize("missing", ["out_destination_id", "out_source_id"])
+async def test_out_required_fields(api, world, missing):
+    payload = entry_payload(world["centre"], entry_type="OUT")
+    del payload[missing]
+
+    res = await api.post(ENTRIES, user=world["centre_user"], json=payload)
+
+    assert res.status == 422
+
+
+async def test_out_entry_does_not_require_a_name(api, world):
+    payload = entry_payload(world["centre"], entry_type="OUT")
+    assert payload["name"] is None
+
+    res = await api.post(ENTRIES, user=world["centre_user"], json=payload)
+
+    assert res.status == 201
+    assert res.json["entry"]["name"] is None
+
+
+async def test_in_entry_rejects_an_out_destination(api, db, world, make_out_destination):
+    zcc = await make_out_destination("ZCC event")
+    payload = entry_payload(world["hub"], out_destination_id=zcc)
+
+    res = await api.post(ENTRIES, user=world["hub_user"], json=payload)
+
+    assert res.status == 422
+    assert await _count_entries(db) == 0
+
+
+async def test_in_entry_rejects_an_out_source(api, db, world, make_out_source):
+    surplus = await make_out_source("surplus")
+    payload = entry_payload(world["hub"], out_source_id=surplus)
+
+    res = await api.post(ENTRIES, user=world["hub_user"], json=payload)
+
+    assert res.status == 422
+    assert await _count_entries(db) == 0
+
+
 async def test_collection_date_must_be_iso(api, world):
     res = await api.post(
         ENTRIES,
@@ -143,9 +183,7 @@ async def test_hub_user_cannot_record_at_another_hub(api, db, world):
 
 
 async def test_hub_user_cannot_record_out_entries(api, world):
-    payload = entry_payload(
-        world["hub"], entry_type="OUT", destination_location_id=world["centre"]
-    )
+    payload = entry_payload(world["hub"], entry_type="OUT")
 
     res = await api.post(ENTRIES, user=world["hub_user"], json=payload)
 
@@ -169,31 +207,36 @@ async def test_food_centre_can_record_in_at_any_location(api, world):
 
 
 async def test_food_centre_out_entry_needs_a_destination(api, world):
-    payload = entry_payload(world["centre"], entry_type="OUT")
+    payload = entry_payload(world["centre"], entry_type="OUT", out_destination_id=None)
 
     res = await api.post(ENTRIES, user=world["centre_user"], json=payload)
 
     assert res.status == 422
 
 
-async def test_food_centre_can_record_out_with_destination(api, world):
-    payload = entry_payload(world["centre"], entry_type="OUT", destination_location_id=world["hub"])
+async def test_food_centre_can_record_out_with_destination(
+    api, world, make_out_destination, make_out_source
+):
+    zcc = await make_out_destination("ZCC event")
+    surplus = await make_out_source("surplus")
+    payload = entry_payload(
+        world["centre"], entry_type="OUT", out_destination_id=zcc, out_source_id=surplus
+    )
 
     res = await api.post(ENTRIES, user=world["centre_user"], json=payload)
 
     assert res.status == 201
-    assert res.json["entry"]["destination_location_id"] == world["hub"]
+    assert res.json["entry"]["out_destination_id"] == zcc
+    assert res.json["entry"]["out_source_id"] == surplus
     assert res.json["entry"]["source_location_id"] is None
 
 
 async def test_out_entry_rejects_a_source_location(api, db, world, make_source_location):
-    """source_location_id ("From") doesn't apply to OUT -- food leaving
-    the centre is being redistributed, not sourced from a donor/shop."""
+    """source_location_id ("From", shop/donor) doesn't apply to OUT -- food
+    leaving the centre is being redistributed, classified via out_source_id
+    instead, a different concept despite the shared "From" label."""
     aldi = await make_source_location("Aldi")
-    payload = entry_payload(
-        world["centre"], entry_type="OUT", destination_location_id=world["hub"],
-        source_location_id=aldi,
-    )
+    payload = entry_payload(world["centre"], entry_type="OUT", source_location_id=aldi)
 
     res = await api.post(ENTRIES, user=world["centre_user"], json=payload)
 
@@ -202,17 +245,16 @@ async def test_out_entry_rejects_a_source_location(api, db, world, make_source_l
 
 
 async def test_database_constraints_backstop_admin_entries(api, db, world):
-    """ADMIN has no application-level restrictions, so the CHECK
-    constraints in the schema are the only thing stopping bad data."""
-    no_destination = entry_payload(world["centre"], entry_type="OUT")
+    """ADMIN has no application-level restriction on destination_location_id
+    being the same as location_id -- the CHECK constraint in the schema is
+    the only thing stopping that particular bad row."""
     to_itself = entry_payload(
         world["centre"], entry_type="OUT", destination_location_id=world["centre"]
     )
 
-    for payload in (no_destination, to_itself):
-        res = await api.post(ENTRIES, user=world["admin"], json=payload)
-        assert res.status == 422
+    res = await api.post(ENTRIES, user=world["admin"], json=to_itself)
 
+    assert res.status == 422
     assert await _count_entries(db) == 0
 
 
@@ -391,17 +433,39 @@ async def test_bulk_applies_hub_role_rules(api, db, world):
 
 
 async def test_bulk_reports_database_constraint_failures_per_entry(api, db, world):
-    out_without_destination = entry_payload(
-        world["centre"], entry_type="OUT", client_uuid=str(uuid.uuid4())
+    to_itself = entry_payload(
+        world["centre"], entry_type="OUT", client_uuid=str(uuid.uuid4()),
+        destination_location_id=world["centre"],
     )
 
-    res = await api.post(
-        BULK, user=world["centre_user"], json={"entries": [out_without_destination]}
-    )
+    res = await api.post(BULK, user=world["centre_user"], json={"entries": [to_itself]})
 
     assert res.status == 200
     assert res.json["results"][0]["status"] == "error"
     assert await _count_entries(db) == 0
+
+
+async def test_bulk_requires_out_destination_and_source(api, db, world):
+    missing_destination = _queued(world, entry_type="OUT", out_destination_id=None)
+    missing_source = _queued(world, entry_type="OUT", out_source_id=None)
+
+    res = await api.post(
+        BULK, user=world["centre_user"],
+        json={"entries": [missing_destination, missing_source]},
+    )
+
+    assert [r["status"] for r in res.json["results"]] == ["error", "error"]
+    assert await _count_entries(db) == 0
+
+
+async def test_bulk_out_entry_does_not_require_a_name(api, db, world):
+    queued = _queued(world, entry_type="OUT")
+    assert queued["name"] is None
+
+    res = await api.post(BULK, user=world["centre_user"], json={"entries": [queued]})
+
+    assert res.json["results"][0]["status"] == "created"
+    assert await _count_entries(db) == 1
 
 
 async def test_bulk_requires_a_session(api, world):

@@ -93,6 +93,8 @@ src/
       0007_add_source_locations.sql -- "From" on Food In, source_locations table
       0008_add_other_source_location.sql
       0009_out_entries_have_no_source_location.sql
+      0010_add_user_pin.sql -- 4-digit PIN login, replacing emailed codes
+      0011_weigh_out_destination_and_source.sql -- "Destination"/"From" on Weigh-out
     migrate.py            -- migration runner (version-table pattern)
     seed.py               -- idempotent seed (categories, locations, source locations, admin)
     client.py             -- asyncpg connection pool
@@ -103,6 +105,8 @@ src/
     entries/              -- weigh-in/out CRUD, bulk offline sync
     locations/            -- hub/centre CRUD
     source_locations/     -- "From" (donor/shop) list for Food In, admin CRUD
+    out_destinations/     -- "Destination" list for Weigh-out, GET-only
+    out_sources/          -- "From" (surplus classification) list for Weigh-out, GET-only
     categories/           -- food category list
     tray_types/           -- tray types used for net weight
     reports/              -- weekly totals, CSV export

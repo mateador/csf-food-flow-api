@@ -178,10 +178,15 @@ async def weekly_report(request):
 async def weekly_export_csv(request):
     """
     V1 restricted to ADMIN per spec. Column layout is a FLAT placeholder
-    (date, location, from, entry_type, name, category, gross weight, trays,
-    net weight) -- PENDING validation against the real CSF spreadsheet
-    template. See docs/CONTRACT.md and the root README's "Known
-    assumptions" section.
+    (date, location, from, destination, entry_type, name, category, gross
+    weight, trays, net weight) -- PENDING validation against the real CSF
+    spreadsheet template. See docs/CONTRACT.md and the root README's
+    "Known assumptions" section.
+
+    "From" shows IN's source_location_name or OUT's out_source_name,
+    whichever applies to that row -- two different tables/concepts behind
+    one column, since only one of them is ever populated for a given row.
+    Same idea for "Destination" (out_destination_name; OUT only).
 
     Rows are sorted by category first (collection date, then location, as
     tie-breakers within a category) -- an explicit request, not part of
@@ -208,14 +213,17 @@ async def weekly_export_csv(request):
     async with pool().acquire() as conn:
         rows = await conn.fetch(
             f"""SELECT we.id, we.collection_date, l.name AS location_name,
-                       sl.name AS source_location_name, we.entry_type,
+                       sl.name AS source_location_name, os.name AS out_source_name,
+                       od.name AS out_destination_name, we.entry_type,
                        we.name AS item_name, we.food_category_code,
                        we.gross_weight_kg, we.net_weight_kg
                 FROM weigh_entries we
                 JOIN locations l ON l.id = we.location_id
                 LEFT JOIN source_locations sl ON sl.id = we.source_location_id
+                LEFT JOIN out_sources os ON os.id = we.out_source_id
+                LEFT JOIN out_destinations od ON od.id = we.out_destination_id
                 WHERE {' AND '.join(conditions)}
-                ORDER BY we.food_category_code, we.collection_date, l.name""",
+                ORDER BY we.entry_type, we.food_category_code, we.collection_date, l.name""",
             *params,
         )
 
@@ -236,17 +244,18 @@ async def weekly_export_csv(request):
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(
-        ["Date", "Location", "From", "Type", "Name", "Category", "Gross Weight (kg)", "Trays",
-         "Net Weight (kg)"]
+        ["Date", "Location", "From", "Destination", "Type", "Name", "Category",
+         "Gross Weight (kg)", "Trays", "Net Weight (kg)"]
     )  # PLACEHOLDER layout
     for row in rows:
         writer.writerow(
             [
                 row["collection_date"].isoformat(),
                 row["location_name"],
-                row["source_location_name"] or "",
+                row["source_location_name"] or row["out_source_name"] or "",
+                row["out_destination_name"] or "",
                 row["entry_type"],
-                row["item_name"],
+                row["item_name"] or "",
                 row["food_category_code"],
                 float(row["gross_weight_kg"]),
                 "; ".join(trays_by_entry.get(str(row["id"]), [])),

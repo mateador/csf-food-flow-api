@@ -206,10 +206,30 @@ async def test_csv_export_rows(api, world):
     assert 'filename="csf-report-2026-09-21.csv"' in res.headers["content-disposition"]
     rows = list(csv.reader(io.StringIO(res.text)))
     assert rows == [
-        ["Date", "Location", "From", "Type", "Name", "Category", "Gross Weight (kg)", "Trays",
-         "Net Weight (kg)"],
-        ["2026-09-21", "North Hub", "Tesco", "IN", "Tesco Newmarket Road", "FRESH", "10.0",
+        ["Date", "Location", "From", "Destination", "Type", "Name", "Category",
+         "Gross Weight (kg)", "Trays", "Net Weight (kg)"],
+        ["2026-09-21", "North Hub", "Tesco", "", "IN", "Tesco Newmarket Road", "FRESH", "10.0",
          "2x Medium", "6.8"],
+    ]
+
+
+async def test_csv_export_shows_destination_and_out_source_for_out_rows(
+    api, world, make_out_destination, make_out_source
+):
+    zcc = await make_out_destination("ZCC event")
+    surplus = await make_out_source("surplus")
+    await _record(
+        api, world["centre_user"], world["centre"], entry_type="OUT",
+        out_destination_id=zcc, out_source_id=surplus, food_category_code="FROZEN",
+        gross_weight_kg=5.0,
+    )
+
+    res = await api.get(CSV, user=world["admin"], params={"week_start": MONDAY.isoformat()})
+
+    rows = list(csv.reader(io.StringIO(res.text)))
+    assert rows[1] == [
+        "2026-09-21", "CSF Food Centre", "surplus", "ZCC event", "OUT", "", "FROZEN", "5.0", "",
+        "5.0",
     ]
 
 
@@ -226,7 +246,7 @@ async def test_csv_export_rows_are_sorted_by_category_first(api, world):
     res = await api.get(CSV, user=world["admin"], params={"week_start": MONDAY.isoformat()})
 
     rows = list(csv.reader(io.StringIO(res.text)))
-    names_and_categories = [(row[4], row[5]) for row in rows[1:]]
+    names_and_categories = [(row[5], row[6]) for row in rows[1:]]
     assert names_and_categories == [
         ("Earlier ambient", "AMBIENT"),
         ("Later ambient", "AMBIENT"),

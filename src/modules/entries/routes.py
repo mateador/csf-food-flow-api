@@ -19,6 +19,8 @@ def _serialize_entry(row, trays: list | None = None) -> dict:
         if row["destination_location_id"]
         else None,
         "source_location_id": str(row["source_location_id"]) if row["source_location_id"] else None,
+        "out_destination_id": str(row["out_destination_id"]) if row["out_destination_id"] else None,
+        "out_source_id": str(row["out_source_id"]) if row["out_source_id"] else None,
         "name": row["name"],
         "food_category_code": row["food_category_code"],
         "gross_weight_kg": float(row["gross_weight_kg"]),
@@ -109,8 +111,15 @@ async def create_entry(request):
     Role rules (enforced HERE, server-side -- never trust the client):
       HUB: may only create IN entries, only at their own assigned location,
            destination_location_id must be null.
-      FOOD_CENTRE: may create IN at any location, or OUT with a destination.
+      FOOD_CENTRE: may create IN at any location, or OUT.
       ADMIN: may create either, for any valid location.
+
+    IN/OUT field rules (checked for every role, not role-specific):
+      IN: requires name and source_location_id; out_destination_id and
+          out_source_id must be absent.
+      OUT: requires out_destination_id and out_source_id; must not have a
+           source_location_id. name is optional (the form no longer
+           collects one).
 
     net_weight_kg is ALWAYS computed here, server-side, from the tray
     selection -- a client-submitted net figure is never trusted, the same
@@ -123,6 +132,8 @@ async def create_entry(request):
     location_id = body.get("location_id")
     destination_location_id = body.get("destination_location_id")
     source_location_id = body.get("source_location_id")
+    out_destination_id = body.get("out_destination_id")
+    out_source_id = body.get("out_source_id")
     name = body.get("name")
     food_category_code = body.get("food_category_code")
     gross_weight_kg = body.get("gross_weight_kg")
@@ -132,38 +143,78 @@ async def create_entry(request):
     trays_input = body.get("trays", [])
 
     if not all(
-        [entry_type, location_id, name, food_category_code, gross_weight_kg, collection_date]
+        [entry_type, location_id, food_category_code, gross_weight_kg, collection_date]
     ):
         return json_response(
             {"error": {"code": "VALIDATION_ERROR", "message": "Missing required field"}},
             status=422,
         )
 
-    # source_location_id ("From") only means something for IN -- food
-    # leaving the centre (OUT) is just being redistributed, not sourced
-    # from a donor/shop, so it's required for IN and must be absent for
-    # OUT. Checked for every role, unlike the destination rules below
-    # which vary by role.
-    if entry_type == "IN" and not source_location_id:
-        return json_response(
-            {
-                "error": {
-                    "code": "VALIDATION_ERROR",
-                    "message": "IN entries require a source_location_id",
-                }
-            },
-            status=422,
-        )
-    if entry_type == "OUT" and source_location_id:
-        return json_response(
-            {
-                "error": {
-                    "code": "VALIDATION_ERROR",
-                    "message": "OUT entries must not have a source_location_id",
-                }
-            },
-            status=422,
-        )
+    # source_location_id ("From", shop/donor) and name are IN-only --
+    # Weigh-out never collects either (OUT is being redistributed, not
+    # sourced from a donor, and has no item name). out_destination_id
+    # ("Destination", an internal program) and out_source_id ("From", a
+    # surplus-type classification -- a different concept from
+    # source_location_id despite the shared field label) are the OUT-only
+    # mirror image. Checked for every role, unlike the role-specific
+    # rules below.
+    if entry_type == "IN":
+        if not name:
+            return json_response(
+                {"error": {"code": "VALIDATION_ERROR", "message": "IN entries require a name"}},
+                status=422,
+            )
+        if not source_location_id:
+            return json_response(
+                {
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "IN entries require a source_location_id",
+                    }
+                },
+                status=422,
+            )
+        if out_destination_id or out_source_id:
+            return json_response(
+                {
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "IN entries must not have out_destination_id or out_source_id",
+                    }
+                },
+                status=422,
+            )
+    elif entry_type == "OUT":
+        if source_location_id:
+            return json_response(
+                {
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "OUT entries must not have a source_location_id",
+                    }
+                },
+                status=422,
+            )
+        if not out_destination_id:
+            return json_response(
+                {
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "OUT entries require an out_destination_id",
+                    }
+                },
+                status=422,
+            )
+        if not out_source_id:
+            return json_response(
+                {
+                    "error": {
+                        "code": "VALIDATION_ERROR",
+                        "message": "OUT entries require an out_source_id",
+                    }
+                },
+                status=422,
+            )
 
     try:
         collection_date = date.fromisoformat(collection_date)
@@ -205,17 +256,9 @@ async def create_entry(request):
                 },
                 status=422,
             )
-    elif user["role"] == "FOOD_CENTRE":
-        if entry_type == "OUT" and not destination_location_id:
-            return json_response(
-                {
-                    "error": {
-                        "code": "VALIDATION_ERROR",
-                        "message": "OUT entries require a destination_location_id",
-                    }
-                },
-                status=422,
-            )
+    # FOOD_CENTRE: no additional restriction -- OUT's required fields
+    # (out_destination_id, out_source_id) are checked above for every
+    # role, not role-specifically like destination_location_id used to be.
     # ADMIN: no additional restriction beyond the DB-level CHECK constraints.
 
     async with pool().acquire() as conn:
@@ -242,15 +285,18 @@ async def create_entry(request):
                 row = await conn.fetchrow(
                     """INSERT INTO weigh_entries
                        (client_uuid, entry_type, location_id, destination_location_id,
-                        source_location_id, name, food_category_code, gross_weight_kg,
-                        net_weight_kg, collection_date, notes, created_by)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        source_location_id, out_destination_id, out_source_id, name,
+                        food_category_code, gross_weight_kg, net_weight_kg, collection_date,
+                        notes, created_by)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                        RETURNING *""",
                     client_uuid,
                     entry_type,
                     location_id,
                     destination_location_id,
                     source_location_id,
+                    out_destination_id,
+                    out_source_id,
                     name,
                     food_category_code,
                     gross_weight_kg,
@@ -315,6 +361,12 @@ async def list_entries(request):
 
     if args.get("source_location_id"):
         conditions.append(f"source_location_id = {add_param(args.get('source_location_id'))}")
+
+    if args.get("out_destination_id"):
+        conditions.append(f"out_destination_id = {add_param(args.get('out_destination_id'))}")
+
+    if args.get("out_source_id"):
+        conditions.append(f"out_source_id = {add_param(args.get('out_source_id'))}")
 
     if args.get("week_start"):
         from datetime import timedelta
@@ -399,29 +451,66 @@ async def bulk_sync_entries(request):
                 )
                 continue
 
-            # source_location_id ("From") only applies to IN -- same rule
-            # as single-entry create. Nullable in the DB (entries recorded
-            # before this field existed have none), so a missing/unwanted
-            # value wouldn't otherwise fail the DB's NOT NULL check the way
-            # other required fields do -- checked explicitly here instead.
-            if item.get("entry_type") == "IN" and not item.get("source_location_id"):
-                results.append(
-                    {
-                        "client_uuid": client_uuid,
-                        "status": "error",
-                        "message": "IN entries require a source_location_id",
-                    }
-                )
-                continue
-            if item.get("entry_type") == "OUT" and item.get("source_location_id"):
-                results.append(
-                    {
-                        "client_uuid": client_uuid,
-                        "status": "error",
-                        "message": "OUT entries must not have a source_location_id",
-                    }
-                )
-                continue
+            # IN/OUT field rules -- same as single-entry create. name and
+            # source_location_id are nullable in the DB now (entries
+            # recorded before these changes existed have none, and OUT
+            # entries don't collect them going forward), so a
+            # missing/unwanted value wouldn't otherwise fail a DB NOT NULL
+            # check the way other required fields do -- checked explicitly
+            # here instead.
+            entry_type = item.get("entry_type")
+            if entry_type == "IN":
+                if not item.get("name"):
+                    results.append(
+                        {"client_uuid": client_uuid, "status": "error", "message": "IN entries require a name"}
+                    )
+                    continue
+                if not item.get("source_location_id"):
+                    results.append(
+                        {
+                            "client_uuid": client_uuid,
+                            "status": "error",
+                            "message": "IN entries require a source_location_id",
+                        }
+                    )
+                    continue
+                if item.get("out_destination_id") or item.get("out_source_id"):
+                    results.append(
+                        {
+                            "client_uuid": client_uuid,
+                            "status": "error",
+                            "message": "IN entries must not have out_destination_id or out_source_id",
+                        }
+                    )
+                    continue
+            elif entry_type == "OUT":
+                if item.get("source_location_id"):
+                    results.append(
+                        {
+                            "client_uuid": client_uuid,
+                            "status": "error",
+                            "message": "OUT entries must not have a source_location_id",
+                        }
+                    )
+                    continue
+                if not item.get("out_destination_id"):
+                    results.append(
+                        {
+                            "client_uuid": client_uuid,
+                            "status": "error",
+                            "message": "OUT entries require an out_destination_id",
+                        }
+                    )
+                    continue
+                if not item.get("out_source_id"):
+                    results.append(
+                        {
+                            "client_uuid": client_uuid,
+                            "status": "error",
+                            "message": "OUT entries require an out_source_id",
+                        }
+                    )
+                    continue
 
             try:
                 validated_trays, total_tray_weight = await _validate_and_price_trays(
@@ -449,15 +538,18 @@ async def bulk_sync_entries(request):
                     row = await conn.fetchrow(
                         """INSERT INTO weigh_entries
                            (client_uuid, entry_type, location_id, destination_location_id,
-                            source_location_id, name, food_category_code, gross_weight_kg,
-                            net_weight_kg, collection_date, notes, created_by)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                            source_location_id, out_destination_id, out_source_id, name,
+                            food_category_code, gross_weight_kg, net_weight_kg, collection_date,
+                            notes, created_by)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                            RETURNING id""",
                         client_uuid,
-                        item.get("entry_type"),
+                        entry_type,
                         item.get("location_id"),
                         item.get("destination_location_id"),
                         item.get("source_location_id"),
+                        item.get("out_destination_id"),
+                        item.get("out_source_id"),
                         item.get("name"),
                         item.get("food_category_code"),
                         gross_weight_kg,

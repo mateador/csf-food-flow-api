@@ -56,16 +56,21 @@ from src.modules.auth.service import issue_session_jwt  # noqa: E402
 # A Monday, so it's a valid week_start for reports.
 MONDAY = date(2026, 9, 21)
 
-# entry_payload()'s default source_location_id -- one of the rows migration
-# 0007 seeds -- looked up once the schema exists rather than hardcoded,
-# since its id is a fresh gen_random_uuid() every time the schema is rebuilt.
+# entry_payload()'s default source_location_id/out_destination_id/
+# out_source_id -- rows the migrations seed -- looked up once the schema
+# exists rather than hardcoded, since their ids are fresh gen_random_uuid()
+# values every time the schema is rebuilt.
 _DEFAULT_SOURCE_LOCATION_NAME = "Tesco"
+_DEFAULT_OUT_DESTINATION_NAME = "ZCC event"
+_DEFAULT_OUT_SOURCE_NAME = "surplus"
 _default_source_location_id: str | None = None
+_default_out_destination_id: str | None = None
+_default_out_source_id: str | None = None
 
 
 # --- Schema: built once per test run ---------------------------------------
 async def _rebuild_schema():
-    global _default_source_location_id
+    global _default_source_location_id, _default_out_destination_id, _default_out_source_id
     conn = await asyncpg.connect(TEST_DATABASE_URL)
     try:
         await conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
@@ -84,6 +89,14 @@ async def _rebuild_schema():
             "SELECT id FROM source_locations WHERE name = $1", _DEFAULT_SOURCE_LOCATION_NAME
         )
         _default_source_location_id = str(row["id"])
+        row = await conn.fetchrow(
+            "SELECT id FROM out_destinations WHERE name = $1", _DEFAULT_OUT_DESTINATION_NAME
+        )
+        _default_out_destination_id = str(row["id"])
+        row = await conn.fetchrow(
+            "SELECT id FROM out_sources WHERE name = $1", _DEFAULT_OUT_SOURCE_NAME
+        )
+        _default_out_source_id = str(row["id"])
     finally:
         await conn.close()
 
@@ -173,6 +186,36 @@ def make_source_location(db):
 
 
 @pytest.fixture
+def make_out_destination(db):
+    async def _make(name, active=True):
+        row = await db.fetchrow(
+            """INSERT INTO out_destinations (name, active) VALUES ($1, $2)
+               ON CONFLICT (name) DO UPDATE SET active = EXCLUDED.active
+               RETURNING id""",
+            name,
+            active,
+        )
+        return str(row["id"])
+
+    return _make
+
+
+@pytest.fixture
+def make_out_source(db):
+    async def _make(name, active=True):
+        row = await db.fetchrow(
+            """INSERT INTO out_sources (name, active) VALUES ($1, $2)
+               ON CONFLICT (name) DO UPDATE SET active = EXCLUDED.active
+               RETURNING id""",
+            name,
+            active,
+        )
+        return str(row["id"])
+
+    return _make
+
+
+@pytest.fixture
 def make_user(db):
     async def _make(role, location_id=None, email=None, name=None, active=True):
         email = email or f"{role.lower()}-{os.urandom(3).hex()}@example.org"
@@ -210,9 +253,11 @@ async def world(make_location, make_user):
 def entry_payload(location_id, **overrides):
     """A valid IN entry at `location_id`. Override any field per test.
 
-    source_location_id only applies to IN (see migration 0009) -- an
-    overridden entry_type="OUT" gets source_location_id=None by default
-    here too, so callers don't have to remember to clear it themselves.
+    source_location_id and name are IN-only; out_destination_id and
+    out_source_id are OUT-only (see migrations 0009 and 0011) -- an
+    overridden entry_type="OUT" gets IN-only fields defaulted to None and
+    OUT-only fields defaulted to seeded rows, so callers don't have to set
+    up the symmetric fields themselves for the common case.
     """
     entry_type = overrides.get("entry_type", "IN")
     payload = {
@@ -220,7 +265,9 @@ def entry_payload(location_id, **overrides):
         "location_id": location_id,
         "destination_location_id": None,
         "source_location_id": _default_source_location_id if entry_type == "IN" else None,
-        "name": "Tesco Newmarket Road",
+        "out_destination_id": _default_out_destination_id if entry_type == "OUT" else None,
+        "out_source_id": _default_out_source_id if entry_type == "OUT" else None,
+        "name": "Tesco Newmarket Road" if entry_type == "IN" else None,
         "food_category_code": "FRESH",
         "gross_weight_kg": 10.0,
         "collection_date": MONDAY.isoformat(),
