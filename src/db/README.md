@@ -11,15 +11,17 @@ patterns favor transparent, hand-written SQL).
 - `migrations/0001_init.sql` — the base schema. All 6 original entities
   (`locations`, `users`, `food_categories`, `weigh_entries`, `audit_log`,
   `magic_link_tokens`), every index and constraint from the spec.
-- `migrations/0002`–`0005` — later changes, applied in order: the
+- `migrations/0002`–`0011` — later changes, applied in order: the
   mandatory `name` field, three extra food categories, tray types with
-  the gross/net weight split, and `login_codes` replacing
-  `magic_link_tokens`.
+  the gross/net weight split, `login_codes` replacing `magic_link_tokens`,
+  source locations ("From" on Food In), the 4-digit user PIN, and the
+  Weigh-out "Destination"/"From" lists (`out_destinations`,
+  `out_sources`). See the root README for the full list.
 - `migrate.py` — runner. Tracks applied migrations in a `schema_migrations`
   table (version + timestamp). Not Alembic, deliberately — see the root
   README for why.
-- `seed.py` — idempotent. Seeds the 3 food categories, one example hub +
-  one food centre, and one admin user. Safe to re-run.
+- `seed.py` — idempotent. Seeds the 6 food categories, one example hub +
+  one food centre, the 11 source locations, and one admin user. Safe to re-run.
 - `client.py` — the `asyncpg` connection pool, initialized once at app
   startup.
 

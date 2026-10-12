@@ -41,17 +41,39 @@ All under `/api/v1`. `docs/openapi.yaml` is the full contract.
 | `POST /auth/code/request`, `POST /auth/code/verify` | Anyone | Emailed one-time code sign-in. Fully working, not currently used by the PWA |
 | `POST /auth/logout` | Anyone | Expire the session cookie on this device |
 | `GET /me` | Signed in | The signed-in user |
-| `POST /entries/` | Signed in | Record a weigh-in or weigh-out. Hub users: Food In at their own hub only |
+| `POST /entries/` | Signed in | Record a weigh-in or weigh-out. Hub users: Food In at their own hub only. See "Entry rules" below |
 | `GET /entries/` | Signed in | List entries (hub users: their own hub only) |
 | `POST /entries/bulk` | Signed in | Upload entries recorded offline. Idempotent by `client_uuid` |
 | `GET /reports/weekly` | Signed in | Monday-to-Sunday totals by category, location and source (hub users: own hub) |
 | `GET /reports/weekly/export.csv` | Admin | The same week as CSV |
-| `GET /locations/`, `GET /categories/`, `GET /tray-types/`, `GET /source-locations/` | Signed in | Reference data for the forms |
+| `GET /locations/`, `GET /categories/`, `GET /tray-types/`, `GET /source-locations/`, `GET /out-destinations/`, `GET /out-sources/` | Signed in | Reference data for the forms (`out-destinations` and `out-sources` feed the Weigh-out "Destination" and "From" fields) |
 | `POST`/`PATCH` on `/locations/`, `/source-locations/`, `/users/`, and `GET /users/` | Admin | Manage hubs, the "From" list and users |
 | `GET /health`, `GET /health/ready` | Anyone | Liveness, and readiness (database reachable) |
 
 Net weight is always worked out by the server from gross weight and trays.
 A net weight sent by the client is ignored.
+
+`GET /entries/{id}`, `PATCH /entries/{id}` and `POST /entries/{id}/void`
+are in `docs/openapi.yaml` but **not implemented** -- entries can't yet be
+fetched singly, corrected or voided (see A6).
+
+### Entry rules
+
+The fields an entry needs depend on its type, and are checked for every
+role:
+
+| | Food In (`IN`) | Weigh-out (`OUT`) |
+|---|---|---|
+| `name` | Required | Optional |
+| `source_location_id` ("From": donor/shop) | Required | Not allowed |
+| `out_destination_id` ("Destination") | Not allowed | Required |
+| `out_source_id` ("From": surplus classification) | Not allowed | Required |
+
+Who may record what: hub users only `IN`, only at their own hub; food
+centre users `IN` at any location or `OUT`; admins either, anywhere.
+
+The "Destination" list (8 values) and Weigh-out "From" list (6 values)
+are seeded by migration `0011`, not by `seed.py`.
 
 ## Architecture Overview
 
@@ -189,14 +211,15 @@ pytest
 Afterwards, `docker stop csf-test-db` stops it and `docker start csf-test-db`
 brings it back. No real email is sent during tests.
 
-128 tests, across `tests/test_auth.py` (sign-in limits, sessions,
-sign-out, housekeeping), `test_entries.py` (role rules, net weight, bulk
+162 tests, across `tests/test_auth.py` (emailed-code sign-in limits,
+sessions, sign-out, housekeeping), `test_pin_auth.py` (PIN setup, login,
+change, admin reset), `test_entries.py` (role rules, net weight, bulk
 sync), `test_reports.py` (totals, CSV), `test_admin.py` and
 `test_health.py`.
 
-Tests marked `xfail` describe a known bug: they state the correct
-behaviour, and are expected to fail until that bug is fixed. Each one's
-`reason` says what's wrong.
+Known bugs, when there are any, are recorded as tests marked `xfail`: they
+state the correct behaviour and are expected to fail until the bug is
+fixed. There are currently none.
 
 ## Authentication
 
@@ -477,8 +500,9 @@ psql postgresql://postgres:restore@localhost:5434/postgres -c "SELECT count(*) F
   validation against CSF's real spreadsheet template. Do not treat this
   layout as final.
 - **A2** — Email sending uses Resend's free tier (3,000/month, 100/day)
-  with a console-log fallback for local dev. A Resend failure is logged at
-  error level and never breaks the code-request endpoint.
+  with a console-log fallback for local dev. It is only used by the dormant
+  emailed-code sign-in (the PIN flow sends no email). A Resend failure is
+  logged at error level and never breaks the code-request endpoint.
 - **A3** — The session cookie is a JWT, but it only proves identity. On
   every request the API reads the user's current status, role and hub
   from the database, so deactivating a user, changing their role or
@@ -487,8 +511,8 @@ psql postgresql://postgres:restore@localhost:5434/postgres -c "SELECT count(*) F
 - **A4** — Automated tests cover auth, entries, bulk sync, reports and
   admin endpoints against a real Postgres database (see "Running the
   tests"). They run on every push and pull request in GitHub Actions, and
-  a deploy only happens when they pass. Known bugs are recorded as `xfail`
-  tests rather than left undocumented.
+  a deploy only happens when they pass. Any known bug would be recorded as
+  an `xfail` test rather than left undocumented (there are none today).
 - **A5** — `docs/openapi.yaml` sync between this repo and the PWA repo is
   a manual discipline (see `docs/CONTRACT.md`). CI compares the two copies
   on every run and warns when they differ, but doesn't block a deploy,
@@ -497,7 +521,8 @@ psql postgresql://postgres:restore@localhost:5434/postgres -c "SELECT count(*) F
   implemented: `GET /entries/{id}`, `PATCH /entries/{id}` and
   `POST /entries/{id}/void`. Entries can't yet be corrected or voided
   through the API. Either implement them (the PWA's entry detail page
-  needs the first), or remove them from the contract.
+  needs the first), or remove them from the contract. They are also not
+  in the endpoints table above, for the same reason.
 - **A7** — Sanic Extensions also serves its own auto-generated API docs at
   `/docs` on the container app's address. That's separate from
   `docs/openapi.yaml`, which is the real contract. Turn it off

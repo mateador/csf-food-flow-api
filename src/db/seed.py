@@ -48,9 +48,9 @@ SOURCE_LOCATIONS = [
     "Other",
 ]
 
-# The initial admin account. No password -- auth is an emailed login code,
-# so this user signs in the same way anyone else does: request a code at
-# /login, no separate bootstrap credential needed. Set SEED_ADMIN_EMAIL to
+# The initial admin account. No PIN is set, so this user signs in the same
+# way anyone else does: enter the email at /login and choose a PIN on the
+# first-time setup screen -- no separate bootstrap credential needed. Set SEED_ADMIN_EMAIL to
 # a real address before seeding a fresh database.
 ADMIN_EMAIL = os.environ.get("SEED_ADMIN_EMAIL", "admin@example.org")
 ADMIN_NAME = "CSF Admin"
